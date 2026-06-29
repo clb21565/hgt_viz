@@ -5,17 +5,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from data import load_hgt1, load_hgt2, load_dr, load_report
+from data import load_hgt1, load_hgt2, load_dr, load_report, dataset_sidebar
 from config import TAX_LEVELS, TAX_LEVEL_NAMES
 
 st.set_page_config(page_title="Overview", layout="wide")
 st.title("Overview")
 
+data_dir, assembly = dataset_sidebar()
+
 with st.spinner("Loading data..."):
-    hgt1 = load_hgt1()
-    hgt2 = load_hgt2()
-    dr = load_dr()
-    report = load_report()
+    hgt1 = load_hgt1(data_dir, assembly)
+    hgt2 = load_hgt2(data_dir, assembly)
+    dr = load_dr(data_dir, assembly)
+    report = load_report(data_dir, assembly)
 
 # ── Key metrics ───────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5 = st.columns(5)

@@ -4,12 +4,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-from data import load_hgt1, load_hgt2, load_groups
+from data import load_hgt1, load_hgt2, load_groups, dataset_sidebar
 from config import TAX_LEVELS, TAX_LEVEL_NAMES
 from features import Feature
 
 st.set_page_config(page_title="Contig View", layout="wide")
 st.title("Contig View")
+
+data_dir, assembly = dataset_sidebar()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MIN_VIS_FRAC = 0.003   # min feature width as fraction of contig length
@@ -25,10 +27,10 @@ PALETTE = [
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def _load_all():
-    h1 = load_hgt1()
-    h2 = load_hgt2()
-    grp = load_groups()
+def _load_all(data_dir: str, assembly: str):
+    h1 = load_hgt1(data_dir, assembly)
+    h2 = load_hgt2(data_dir, assembly)
+    grp = load_groups(data_dir, assembly)
     # region_idx → coordinates lookup (used for HGT2 ribbon drawing)
     # Start with groups file (covers HGT2-only contigs), then override with hgt1 (more complete)
     ridx = (
@@ -44,7 +46,7 @@ def _load_all():
     return h1, h2, grp, ridx
 
 with st.spinner("Loading data…"):
-    hgt1, hgt2, groups, region_idx_lookup = _load_all()
+    hgt1, hgt2, groups, region_idx_lookup = _load_all(data_dir, assembly)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:

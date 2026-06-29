@@ -5,18 +5,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from data import load_report, load_groups
+from data import load_report, load_groups, dataset_sidebar
 from config import TAX_LEVELS, TAX_LEVEL_NAMES
 
 st.set_page_config(page_title="HGT Groups", layout="wide")
 st.title("HGT Groups")
+
+data_dir, assembly = dataset_sidebar()
 st.markdown(
     "Groups cluster HGT regions from multiple contigs that likely share a common transferred element. "
     "Explore group size, taxonomic diversity, and region characteristics."
 )
 
 with st.spinner("Loading group data..."):
-    report = load_report()
+    report = load_report(data_dir, assembly)
 
 # ── Controls ──────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns(3)

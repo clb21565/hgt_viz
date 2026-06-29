@@ -5,11 +5,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from data import load_hgt1
+from data import load_hgt1, dataset_sidebar
 from config import TAX_LEVELS, TAX_LEVEL_NAMES
 
 st.set_page_config(page_title="Mismatch Heatmap", layout="wide")
 st.title("Taxonomic Mismatch Heatmap")
+
+data_dir, assembly = dataset_sidebar()
 st.markdown(
     "Each cell counts how many **HGT1 regions** have a given *region taxonomy* (Y axis, the putative donor lineage) "
     "embedded in a contig with a different *contig taxonomy* (X axis, the recipient organism). "
@@ -17,7 +19,7 @@ st.markdown(
 )
 
 with st.spinner("Loading HGT1 data..."):
-    hgt1 = load_hgt1()
+    hgt1 = load_hgt1(data_dir, assembly)
 
 # ── Controls ──────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns(3)

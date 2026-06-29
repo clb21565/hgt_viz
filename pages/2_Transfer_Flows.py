@@ -6,11 +6,13 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
-from data import load_hgt1, load_hgt2
+from data import load_hgt1, load_hgt2, dataset_sidebar
 from config import TAX_LEVELS, TAX_LEVEL_NAMES
 
 st.set_page_config(page_title="Transfer Flows", layout="wide")
 st.title("Transfer Flows")
+
+data_dir, assembly = dataset_sidebar()
 st.markdown(
     "Sankey diagram showing the flow of genetic material between taxonomic groups. "
     "**Method 1**: region taxonomy (donor lineage) → contig taxonomy (recipient organism). "
@@ -45,7 +47,7 @@ with col4:
 # ── Build pairs dataframe ─────────────────────────────────────────────────────
 with st.spinner("Loading..."):
     if method.startswith("HGT1"):
-        df = load_hgt1()
+        df = load_hgt1(data_dir, assembly)
         if det_levels:
             df = df[df["detection_level"].isin(det_levels)]
         src_col = f"{lvl}_region"
@@ -56,7 +58,7 @@ with st.spinner("Loading..."):
         source_label = f"Region ({TAX_LEVEL_NAMES[lvl]})"
         target_label = f"Contig ({TAX_LEVEL_NAMES[lvl]})"
     else:
-        df = load_hgt2()
+        df = load_hgt2(data_dir, assembly)
         src_col = f"{lvl}_contig1"
         tgt_col = f"{lvl}_contig2"
         pairs = df[[src_col, tgt_col]].dropna().copy()
