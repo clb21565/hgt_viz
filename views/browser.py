@@ -122,11 +122,13 @@ def _detail(sel):
 
     # gene map with optional zoom to a region
     zoom_opts = ["Whole contig"] + c_regions["region_idx"].tolist()
-    zc = st.columns([3, 2])
+    zc = st.columns([2, 3])
     zoom = zc[0].selectbox("Zoom to", zoom_opts, key=f"zoom_{sel}")
     color_opts = {"CARD / RIP-DB hits": "hits"}
     if store.has("eggnog"):
         color_opts["COG group (eggNOG)"] = "cog"
+    if store.has("genes") and "cluster" in store.genes.columns:
+        color_opts["Identical ORFs (mmseqs clusters)"] = "cluster"
     color_by = color_opts[zc[1].radio("Colour genes by", list(color_opts), horizontal=True,
                                       key="color_by")]
     x_range = None

@@ -20,6 +20,11 @@ COG_COLORS = {COG.MOBILE: "#2a78d6", COG.INFO: "#eb6834", COG.CELL: "#eda100",
               COG.METAB: "#e87ba4", COG.POOR: "#a3a29c", COG.NONE: "#d6d5d0"}
 SEQ_BLUE = [[0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1, "#0d366b"]]
 
+# ORF-cluster mode: the four categorical hues that pass every pairwise check (clusters
+# sit side by side in any order), each also labelled with its number on the map.
+CLUSTER_COLORS = ["#2a78d6", "#eda100", "#008300", "#e34948"]
+SHARED_ORF = "#6b6a65"    # identical copy on another contig, beyond the 4 coloured clusters
+UNIQUE_ORF = "#d6d5d0"    # no identical copy anywhere in the catalogue
 SEGMENT = "#6b6a65"   # neutral: shared-segment ticks (blue is a gene colour in both modes)
 
 GENE_H = 0.28      # half-height of a gene arrow
@@ -35,6 +40,14 @@ def gene_category(genes: pd.DataFrame, ann: pd.DataFrame | None,
     g["annotation"] = ""
     g["cog_group"] = COG.NONE
     g["eggnog"] = ""
+    g["clcat"] = "unique"
+    if "cl_contigs" in g.columns:
+        g["cl_text"] = np.where(
+            g["cluster"] >= 0,
+            "ORF cluster #" + g["cluster"].astype(str) + ": " + g["cl_members"].astype(str)
+            + " copies on " + g["cl_contigs"].astype(str) + " contig(s)", "")
+    else:
+        g["cl_text"] = ""
     if eggnog is not None and len(eggnog):
         e = eggnog.drop_duplicates("orf_id").set_index("orf_id")
         hit = g["orf_id"].isin(e.index)
@@ -82,6 +95,37 @@ def _arrows(df, y, xf, head):
     return xs, ys
 
 
+def assign_clusters(frames, paired=False, n=len(CLUSTER_COLORS)):
+    """Pick up to n ORF clusters to colour in this view and set each gene's `clcat`
+    (cl1..cln / shared / unique). Single contig: clusters with copies on the most
+    other contigs. Paired: clusters present on both contigs, most genes first.
+    Returns {cluster id: (number, colour, cl_contigs)}."""
+    frames = [f for f in frames if f is not None]
+    if not frames or "cluster" not in frames[0].columns:
+        return {}
+    for f in frames:
+        f["clcat"] = np.where(f["cl_contigs"] > 1, "shared", "unique")
+    if paired and len(frames) == 2:
+        both = set(frames[0]["cluster"]) & set(frames[1]["cluster"]) - {-1}
+        cand = pd.concat(frames)
+        cand = cand[cand["cluster"].isin(both)]
+        order = (cand.groupby("cluster").agg(n=("orf_id", "size"), pos=("start", "min"))
+                 .sort_values(["n", "pos"], ascending=[False, True]).index)
+    else:
+        f = frames[0]
+        cand = f[(f["cl_contigs"] > 1)]
+        order = (cand.groupby("cluster").agg(k=("cl_contigs", "max"), pos=("start", "min"))
+                 .sort_values(["k", "pos"], ascending=[False, True]).index)
+    pick = {}
+    for i, cl in enumerate(order[:n]):
+        k = int(pd.concat(frames).loc[lambda d: d["cluster"] == cl, "cl_contigs"].iloc[0])
+        pick[cl] = (i + 1, CLUSTER_COLORS[i], k)
+    for f in frames:
+        for cl, (i, _, _) in pick.items():
+            f.loc[f["cluster"] == cl, "clcat"] = f"cl{i}"
+    return pick
+
+
 def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=None,
               color_by="hits"):
     """Draw one contig: backbone, region bands, genes, gene hover points."""
@@ -107,6 +151,9 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
     if genes is not None and len(genes):
         if color_by == "cog":
             layers = [(genes["cog_group"] == grp, c) for grp, c in COG_COLORS.items()]
+        elif color_by == "cluster":
+            layers = [(genes["clcat"] == "unique", UNIQUE_ORF), (genes["clcat"] == "shared", SHARED_ORF)]
+            layers += [(genes["clcat"] == f"cl{i + 1}", c) for i, c in enumerate(CLUSTER_COLORS)]
         else:
             layers = [(genes["category"] == cat, c) for cat, c in
                       [("gene", GENE), ("RIP-DB", RIP), ("CARD", CARD)]]
@@ -119,14 +166,23 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
                                      fillcolor=color, line=dict(color=color, width=0.5),
                                      hoverinfo="skip",
                                      showlegend=False))
+        if color_by == "cluster":
+            lab = genes[genes["clcat"].str.startswith("cl")]
+            if len(lab):
+                fig.add_trace(go.Scatter(
+                    x=[(xf(s) + xf(e)) / 2 for s, e in zip(lab["start"], lab["end"])],
+                    y=[y + GENE_H + 0.1] * len(lab), mode="text", text=lab["clcat"].str[2:],
+                    textfont=dict(size=11, color="#52514e"), hoverinfo="skip", showlegend=False))
         mid = [(xf(s) + xf(e)) / 2 for s, e in zip(genes["start"], genes["end"])]
         text = [f"<b>{o}</b><br>{s + 1:,}–{e:,} ({'+' if st > 0 else '−'})"
                 + (f"<br>{an}" if an else "")
                 + (f"<br>{eg}" if eg else "")
+                + (f"<br>{cl}" if cl else "")
                 + (f"<br>region {ri}" if isinstance(ri, str) else "")
-                for o, s, e, st, an, eg, ri in zip(
+                for o, s, e, st, an, eg, cl, ri in zip(
                     genes["orf_id"], genes["start"], genes["end"], genes["strand"],
                     genes["annotation"], genes.get("eggnog", [""] * len(genes)),
+                    genes.get("cl_text", [""] * len(genes)),
                     genes.get("region_idx", [None] * len(genes)))]
         fig.add_trace(go.Scatter(x=mid, y=[y] * len(mid), mode="markers",
                                  marker=dict(size=10, opacity=0),
@@ -148,9 +204,15 @@ def _region_hover(r):
     return "<br>".join(lines)
 
 
-def _legend(fig, cats):
+def _legend(fig, cats, clusters=None):
+    for cl, (i, color, k) in (clusters or {}).items():
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                 name=f"{i}: ORF cluster #{cl} ({k} contigs)",
+                                 marker=dict(size=11, color=color, symbol="square")))
     for name, color in ([("CARD hit", CARD), ("RIP-DB hit", RIP), ("other gene", GENE)]
                         + list(COG_COLORS.items())
+                        + [("identical copy on another contig", SHARED_ORF),
+                           ("unique ORF (no identical copy)", UNIQUE_ORF)]
                         + [("HGT1 region", HGT1), ("other kairos region", REGION)]):
         if name in cats:
             fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=name,
@@ -174,6 +236,10 @@ def _gene_cats(genes, color_by):
         return set()
     if color_by == "cog":
         return set(genes["cog_group"].unique())
+    if color_by == "cluster":
+        names = {"unique": "unique ORF (no identical copy)",
+                 "shared": "identical copy on another contig"}
+        return {names[c] for c in genes["clcat"].unique() if c in names}
     return {"other gene"} | {"CARD hit" if c == "CARD" else "RIP-DB hit"
                              for c in genes["category"].unique() if c != "gene"}
 
@@ -181,6 +247,9 @@ def _gene_cats(genes, color_by):
 def contig_map(contig, length, genes, regions, links=None, x_range=None, color_by="hits"):
     """One contig, with shared segments to partner contigs as ticks underneath."""
     fig = go.Figure()
+    if genes is not None:
+        genes = genes.copy()
+    clusters = assign_clusters([genes]) if color_by == "cluster" else {}
     add_track(fig, genes, regions, 1.0, f"{contig} · {length:,} bp", length, x_range=x_range,
               color_by=color_by)
     if links is not None and len(links):
@@ -206,10 +275,29 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None, color_b
     cats = _gene_cats(genes, color_by) or {"other gene"}
     if len(regions):
         cats |= {"HGT1 region" if pd.notna(x) else "other kairos region" for x in regions["hgt1_rank"]}
-    _legend(fig, cats)
+    _legend(fig, cats, clusters)
     _layout(fig, 260, x_range or [0, length])
     fig.update_yaxes(range=[0, 1.65])
     return fig
+
+
+def _ribbons(fig, g1, g2, xf2, y2, clusters, max_pairs=400):
+    """Connect genes of the same ORF cluster on the two tracks (clinker-style)."""
+    m = g1[g1["cluster"] >= 0].merge(g2[g2["cluster"] >= 0], on="cluster", suffixes=("_1", "_2"))
+    if m.empty:
+        return
+    m = m.head(max_pairs)
+    by_color = {}
+    for r in m.itertuples(index=False):
+        a, b = sorted((xf2(r.start_2), xf2(r.end_2)))
+        color = clusters.get(r.cluster, (None, SHARED_ORF, None))[1]
+        xs, ys = by_color.setdefault(color, ([], []))
+        xs += [r.start_1, r.end_1, b, a, r.start_1, None]
+        ys += [1.0 - GENE_H, 1.0 - GENE_H, y2 + GENE_H, y2 + GENE_H, 1.0 - GENE_H, None]
+    for color, (xs, ys) in by_color.items():
+        fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", mode="lines", fillcolor=color,
+                                 opacity=0.25, line=dict(width=0), hoverinfo="skip",
+                                 showlegend=False))
 
 
 def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad=5000,
@@ -230,10 +318,16 @@ def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad
     fig = go.Figure()
     a, b = sorted((xf2(s2), xf2(e2)))
     y2 = -0.6
-    fig.add_trace(go.Scatter(x=[s1, e1, b, a, s1], y=[1.0 - BAND_H, 1.0 - BAND_H, y2 + BAND_H,
-                                                      y2 + BAND_H, 1.0 - BAND_H],
-                             fill="toself", fillcolor=LINK, line=dict(width=0), mode="lines",
-                             hoverinfo="skip", showlegend=False))
+    if color_by != "cluster":   # in cluster mode the gene ribbons show the alignment
+        fig.add_trace(go.Scatter(x=[s1, e1, b, a, s1], y=[1.0 - BAND_H, 1.0 - BAND_H, y2 + BAND_H,
+                                                          y2 + BAND_H, 1.0 - BAND_H],
+                                 fill="toself", fillcolor=LINK, line=dict(width=0), mode="lines",
+                                 hoverinfo="skip", showlegend=False))
+    clusters = {}
+    if color_by == "cluster" and genes1 is not None and genes2 is not None:
+        genes1, genes2 = genes1.copy(), genes2.copy()
+        clusters = assign_clusters([genes1, genes2], paired=True)
+        _ribbons(fig, genes1, genes2, xf2, y2, clusters)
     add_track(fig, genes1, regions1, 1.0, f"{c1} · {len1:,} bp", len1, x_range=x_range,
               color_by=color_by)
     strand_note = " (reverse complement)" if int(link.get("strand", 1) or 1) < 0 else ""
@@ -241,7 +335,7 @@ def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad
               x_range=x_range, color_by=color_by)
     cats = {"HGT1 region", "other kairos region"} | _gene_cats(genes1, color_by) \
         | _gene_cats(genes2, color_by)
-    _legend(fig, cats)
+    _legend(fig, cats, clusters)
     _layout(fig, 340, x_range, xtitle=f"Position on {c1} (bp)")
     fig.update_yaxes(range=[y2 - 0.55, 1.65])
     return fig

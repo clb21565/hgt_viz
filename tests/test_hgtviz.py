@@ -162,6 +162,24 @@ def test_emapper_v2_0_header(tmp_path):
     assert eg.loc[0, "description"] == "Transposase" and bool(eg.loc[0, "in_region"])
 
 
+def test_orf_clusters(demo):
+    from hgtviz import genemap as G
+    g = demo.genes
+    assert {"cluster", "cl_members", "cl_contigs"} <= set(g.columns)
+    assert (g["cluster"] >= 0).all() and (g["cl_contigs"] >= 1).all()
+    assert (g["cl_members"] >= g["cl_contigs"]).all()
+    # copies of an element gene on two linked contigs share a cluster
+    e = demo.link_ends[demo.link_ends["is_hgt2"]].iloc[0]
+    g1, g2 = demo.rows_for("genes", e["contig"]), demo.rows_for("genes", e["partner"])
+    shared = set(g1["cluster"]) & set(g2["cluster"])
+    assert shared
+    a, b = G.gene_category(g1, None), G.gene_category(g2, None)
+    pick = G.assign_clusters([a, b], paired=True)
+    assert 0 < len(pick) <= len(G.CLUSTER_COLORS) and set(pick) <= shared
+    assert set(a.loc[a["cluster"].isin(pick), "clcat"]) <= {f"cl{i}" for i in range(1, 5)}
+    assert (a.loc[a["cl_contigs"] == 1, "clcat"] == "unique").all()
+
+
 def test_missing_store(tmp_path):
     with pytest.raises(S.StoreError):
         S.load(str(tmp_path))

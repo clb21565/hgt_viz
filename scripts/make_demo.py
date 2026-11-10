@@ -250,6 +250,22 @@ def main():
                   for n, fam, dc, mech in CARD_GENES]).to_csv(
         os.path.join(a.out, "aro_index.tsv"), sep="\t", index=False)
 
+    # mmseqs ORF clusters: copies of the same element gene cluster together
+    rep_of = {}
+    for kind, ei, orfs in region_orfs.values():
+        if kind == "el":
+            for j, o in enumerate(orfs):
+                rep_of[o] = ("el", ei, j)
+    first = {}
+    with open(f"{det}.ffn.clusts_cluster.tsv", "w") as fh:
+        rows = []
+        for g in genes:
+            key = rep_of.get(g[0], g[0])
+            first.setdefault(key, g[0])
+            rows.append((first[key], g[0]))
+        rows.sort()
+        fh.writelines(f"{r}\t{m}\n" for r, m in rows)
+
     write_emapper(f"{det}.faa.eggs.emapper.annotations", genes, region_orfs, elements, card,
                   rip, rng)
 

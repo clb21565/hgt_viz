@@ -47,6 +47,7 @@ Inputs (under `results/detect/`, prefix = catalogue name, auto-detected):
 | `NAME.ffn_coords.tsv` | | gene coordinates |
 | `NAME-card.tsv`, `NAME-ripdb.tsv` | | diamond best hits (`qtitle stitle pident bitscore evalue`) |
 | `NAME.faa.eggs.emapper.annotations` | | eggNOG-mapper 2.0 / 2.1 output (`--eggnog` to point elsewhere) |
+| `NAME.ffn.clusts_cluster.tsv` | | mmseqs ORF clusters used by kairos-lr (`--orf-clusters` to point elsewhere) |
 | `results/call/insitu_events.tsv` | | in situ calls |
 
 Notes:
@@ -61,6 +62,13 @@ Notes:
   `parA` / `parB` hits are labelled `partition`, all others `replication`.
 - Only genes and hits on base contigs and their link partners are kept, so the store
   stays small even for a large catalogue.
+- ORF clusters: two streaming passes give each store gene its cluster and the
+  cluster's catalogue-wide size (copies) and spread (contigs). The gene map's
+  "Identical ORFs" mode colours at most 4 clusters per view, numbered on the map (the
+  four hues that stay distinguishable pairwise): in a single contig, the clusters with
+  copies on the most other contigs; in the two-contig view, clusters on both contigs,
+  joined by ribbons. Other genes with an identical copy elsewhere are dark grey,
+  unique genes light grey; hover shows every gene's cluster.
 - eggNOG: the file is streamed in chunks and reduced to the genes in the store and the
   columns name, description, COG category, KEGG KO, Pfam, CAZy, EC, e-value (GO terms
   and KEGG pathways are dropped). `eggnog.parquet` is sorted by contig and the app reads

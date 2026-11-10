@@ -15,6 +15,7 @@ Reads (under results/detect/, prefix = catalogue name):
             NAME.ffn_coords.tsv                      prodigal ORF coordinates
             NAME-card.tsv, NAME-ripdb.tsv            diamond best hits
             NAME.faa.eggs.emapper.annotations        eggNOG-mapper (2.0 or 2.1) output
+            NAME.ffn.clusts_cluster.tsv              mmseqs ORF clusters (rep, member)
   and results/call/insitu_events.tsv (optional).
 
 Writes Parquet tables (contigs, regions, links, groups, dr, genes, annotations,
@@ -383,6 +384,48 @@ def load_eggnog(path, genes, log, chunksize=2_000_000):
                "max_annot_lvl"]]
 
 
+def load_orf_clusters(path, genes, log, chunksize=5_000_000):
+    """Cluster of each store gene from mmseqs `rep<TAB>member` rows, with catalogue-
+    wide cluster size (members) and spread (distinct contigs). Two streaming passes:
+    1) the representative of each store gene, 2) members of those clusters only.
+    Contigs are counted via 64-bit hashes so pass 2 stays small in memory."""
+    def chunks():
+        return pd.read_csv(path, sep="\t", header=None, names=["rep", "member"], dtype=str,
+                           chunksize=chunksize, quoting=3)
+    keep = pd.Index(genes["orf_id"])
+    reps, n = [], 0
+    for ch in chunks():
+        n += len(ch)
+        reps.append(ch[ch["member"].isin(keep)])
+    rep_of = pd.concat(reps, ignore_index=True).drop_duplicates("member").set_index("member")["rep"]
+    log(f"ORF clusters: {n:,} rows; {len(rep_of):,} of {len(genes):,} store genes clustered")
+    if rep_of.empty:
+        log(f"WARNING: no ORF IDs in {path} match ffn_coords.tsv (e.g. {genes['orf_id'].iloc[0]!r})")
+        return None
+    rep_idx = pd.Index(pd.unique(rep_of.to_numpy()))
+    pairs = []
+    for ch in chunks():
+        code = rep_idx.get_indexer(ch["rep"])
+        m = code >= 0
+        if m.any():
+            contig = ch.loc[m, "member"].str.rsplit("_", n=1).str[0]
+            pairs.append(pd.DataFrame({"c": code[m].astype(np.int32),
+                                       "h": pd.util.hash_array(contig.to_numpy(dtype=object))}))
+    pairs = pd.concat(pairs, ignore_index=True)
+    size = np.bincount(pairs["c"], minlength=len(rep_idx))
+    spread = np.bincount(pairs.drop_duplicates()["c"], minlength=len(rep_idx))
+    code = rep_idx.get_indexer(genes["orf_id"].map(rep_of))
+    has = code >= 0
+    out = pd.DataFrame(index=genes.index)
+    out["cluster"] = np.where(has, code, -1).astype(np.int32)
+    out["cl_members"] = np.where(has, size[np.maximum(code, 0)], 0).astype(np.int32)
+    out["cl_contigs"] = np.where(has, spread[np.maximum(code, 0)], 0).astype(np.int32)
+    shared = (out["cl_contigs"] > 1).sum()
+    log(f"ORF clusters: {len(rep_idx):,} clusters touch the store; {shared:,} store genes have an "
+        f"identical copy (same cluster) on another contig")
+    return out
+
+
 def cog_counts(genes, eg):
     """Genes per (contig, COG letter, inside a kairos region). Genes with several
     letters count once per letter; genes without a COG count under '-'."""
@@ -405,7 +448,8 @@ def load_insitu(results, log):
 
 # ── main build ───────────────────────────────────────────────────────────────
 
-def build(results, out, catalogue=None, card_index=None, eggnog=None, log=print):
+def build(results, out, catalogue=None, card_index=None, eggnog=None, orf_clusters=None,
+          log=print):
     detect_dir = os.path.join(results, "detect")
     if not os.path.isdir(detect_dir):
         detect_dir = results  # allow pointing straight at results/detect
@@ -541,6 +585,16 @@ def build(results, out, catalogue=None, card_index=None, eggnog=None, log=print)
     else:
         contigs["drug_classes"] = ""
 
+    clusters_path = orf_clusters or f"{det}.ffn.clusts_cluster.tsv"
+    if genes is not None and os.path.exists(clusters_path):
+        cl = load_orf_clusters(clusters_path, genes, log)
+        if cl is not None:
+            genes = pd.concat([genes, cl], axis=1)
+    elif orf_clusters:
+        raise SystemExit(f"--orf-clusters: not found: {orf_clusters}")
+    else:
+        log("ORF clusters: no .ffn.clusts_cluster.tsv; no identical-ORF colouring")
+
     eggnog_path = eggnog or find_eggnog(det)
     eg = cc = None
     if eggnog_path and genes is not None:
@@ -587,6 +641,8 @@ def build(results, out, catalogue=None, card_index=None, eggnog=None, log=print)
         "hgt2_source": hgt2_source,
         "card_index": os.path.abspath(card_index) if card_index else None,
         "eggnog": os.path.abspath(eggnog_path) if eg is not None else None,
+        "orf_clusters": (os.path.abspath(clusters_path)
+                         if genes is not None and "cluster" in genes.columns else None),
     }
     with open(os.path.join(out, "meta.json"), "w") as fh:
         json.dump(meta, fh, indent=2)
@@ -603,8 +659,9 @@ def main(argv=None):
     ap.add_argument("--card-index", help="CARD aro_index.tsv, for drug class / gene family / mechanism")
     ap.add_argument("--eggnog", help="emapper .annotations file (default: NAME.faa.eggs.emapper.annotations "
                                      "next to the other detect outputs)")
+    ap.add_argument("--orf-clusters", help="mmseqs ORF cluster TSV (default: NAME.ffn.clusts_cluster.tsv)")
     a = ap.parse_args(argv)
-    build(a.results, a.out, a.catalogue, a.card_index, a.eggnog)
+    build(a.results, a.out, a.catalogue, a.card_index, a.eggnog, a.orf_clusters)
 
 
 if __name__ == "__main__":
