@@ -1,0 +1,10 @@
+name: hgt_viz
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - streamlit>=1.50
+  - plotly>=5.20
+  - pandas>=2.0
+  - numpy>=1.26
+  - pyarrow>=14

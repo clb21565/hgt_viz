@@ -73,6 +73,20 @@ directory offers to build the store there.
 
 ### On an HPC compute node
 
+`slurm/hgt_viz.sbatch` builds the store (if `STORE/meta.json` is missing, or with
+`REBUILD=1`) and then serves the app. Create the env once with
+`conda env create -f environment.yml`, then:
+
+```bash
+sbatch --export=ALL,REPO=$PWD,RESULTS=/path/to/kairos-lr/results,CARD_INDEX=/path/to/aro_index.tsv \
+    slurm/hgt_viz.sbatch
+```
+
+`STORE` defaults to `hgt_viz_store/` next to `results/`. Build memory and time go to
+`build_time_<jobid>.txt`. The log prints the `ssh -L` tunnel command.
+
+Or by hand:
+
 ```bash
 #!/bin/bash
 #SBATCH --job-name=hgt_viz
