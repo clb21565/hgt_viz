@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -16,17 +17,19 @@ if filtered.empty:
     st.stop()
 
 names = set(filtered["contig"])
-R = store.regions[store.regions["contig"].isin(names)]
+R = store.subset("regions", filtered)
 H1 = R[R["hgt1_rank"].notna()]
-E = store.link_ends
-E = E[E["is_hgt2"] & E["contig"].isin(names)]
-A = store.annotations[store.annotations["contig"].isin(names)] if store.has("annotations") else None
+E = store.subset("link_ends", filtered, hgt2_only=True,
+                 cols=["contig", "partner"] + [f"p_{r}" for r in RANKS])
+A = store.subset("annotations", filtered) if store.has("annotations") else None
 
 m = st.columns(5)
 m[0].metric("Contigs", f"{len(filtered):,}")
 m[1].metric("HGT1 regions", f"{len(H1):,}")
-pair_keys = {tuple(sorted(p)) for p in E[["contig", "partner"]].itertuples(index=False)}
-m[2].metric("HGT2 contig pairs", f"{len(pair_keys):,}",
+lo = np.minimum(E["_cid"].to_numpy(), E["_pid"].to_numpy()).astype(np.int64)
+hi = np.maximum(E["_cid"].to_numpy(), E["_pid"].to_numpy()).astype(np.int64)
+n_pairs = len(np.unique(lo * (len(store.ids()) + 1) + hi))
+m[2].metric("HGT2 contig pairs", f"{n_pairs:,}",
             help="Distinct contig pairs with at least one contig in the filtered set.")
 m[3].metric("Donor–recipient pairs",
             f"{store.dr[store.dr['recipient'].isin(names) | store.dr['donor'].isin(names)].shape[0]:,}")
@@ -86,14 +89,16 @@ left, right = st.columns(2)
 with left:
     st.markdown("**HGT1: region taxon → host contig taxon**")
     st.caption("One count per HGT1 region. Rows are the region's (putative donor) lineage.")
-    h = H1[["contig", f"r_{rank}"]].merge(filtered[["contig", rank]], on="contig").dropna()
+    h = pd.DataFrame({f"r_{rank}": H1[f"r_{rank}"].to_numpy(),
+                      rank: store.contigs[rank].to_numpy()[H1["_cid"].to_numpy()]}).dropna()
     h = h[h[f"r_{rank}"] != h[rank]]
     heatmap(h, rank, f"r_{rank}", "Host contig", "Region")
 with right:
     st.markdown("**HGT2: contig taxon ↔ partner taxon**")
     st.caption("One count per distinct contig pair; HGT2 has no direction, so the matrix is symmetric.")
-    pairs = E[["contig", "partner", f"p_{rank}"]].drop_duplicates(["contig", "partner"])
-    pairs = pairs.merge(store.contigs[["contig", rank]], on="contig").dropna()
+    pairs = E[["_cid", "_pid", f"p_{rank}"]].drop_duplicates(["_cid", "_pid"])
+    pairs = pd.DataFrame({f"p_{rank}": pairs[f"p_{rank}"].to_numpy(),
+                          rank: store.contigs[rank].to_numpy()[pairs["_cid"].to_numpy()]}).dropna()
     pairs = pairs[pairs[rank] != pairs[f"p_{rank}"]]
     heatmap(pairs, f"p_{rank}", rank, "Partner", "Contig", symmetric=True)
 

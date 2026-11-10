@@ -5,6 +5,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 from . import RANKS
@@ -30,17 +31,19 @@ class Store:
     insitu: pd.DataFrame | None = None
     _ends: pd.DataFrame | None = field(default=None, repr=False)
     _index: dict = field(default_factory=dict, repr=False)
-    cache: OrderedDict = field(default_factory=OrderedDict, repr=False)
+    caches: dict = field(default_factory=dict, repr=False)
 
-    def memo(self, key, fn, maxsize=64):
-        """Small LRU shared by all sessions (the store is read-only)."""
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
+    def memo(self, key, fn, maxsize=64, bucket="small"):
+        """LRU shared by all sessions (the store is read-only). Large results go in
+        their own bucket with a small maxsize to bound memory."""
+        cache = self.caches.setdefault(bucket, OrderedDict())
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
         val = fn()
-        self.cache[key] = val
-        if len(self.cache) > maxsize:
-            self.cache.popitem(last=False)
+        cache[key] = val
+        if len(cache) > maxsize:
+            cache.popitem(last=False)
         return val
 
     def rows_for(self, name, contig, col="contig") -> pd.DataFrame | None:
@@ -54,6 +57,56 @@ class Store:
             self._index[key] = df.groupby(col, sort=False, observed=True).indices
         pos = self._index[key].get(contig)
         return df.iloc[pos] if pos is not None else df.iloc[:0]
+
+    def ids(self) -> pd.Index:
+        """Every contig name in the store. Base contigs come first, in store.contigs
+        order, so a base contig's code equals its row position in store.contigs."""
+        if "ids" not in self._index:
+            base = pd.Index(self.contigs["contig"])
+            other = pd.Index(pd.unique(pd.concat(
+                [self.links["contig_a"], self.links["contig_b"], self.regions["contig"]],
+                ignore_index=True)))
+            self._index["ids"] = base.append(other.difference(base))
+        return self._index["ids"]
+
+    def codes(self, name, col="contig") -> np.ndarray:
+        """Integer contig code of each row of table `name` (cached)."""
+        key = ("codes", name, col)
+        if key not in self._index:
+            df = self.link_ends if name == "link_ends" else getattr(self, name)
+            self._index[key] = self.ids().get_indexer(df[col])
+        return self._index[key]
+
+    def subset(self, name, filtered: pd.DataFrame, hgt2_only=False, cols=None) -> pd.DataFrame:
+        """Rows of `name` (regions, link_ends, annotations) on the filtered contigs, with
+        integer codes `_cid` (and `_pid` for the partner of a link end). A boolean
+        lookup on codes instead of a string isin. Only the row positions are memoised
+        (per filtered set); pass `cols` to copy just the columns you need.
+        `filtered` must be a slice of store.contigs (its index = row positions)."""
+        sig = hash(filtered.index.to_numpy().tobytes())
+        pos = self.memo(("subset", name, hgt2_only, len(filtered), sig),
+                        lambda: self._positions(name, filtered, hgt2_only), maxsize=32,
+                        bucket="subsets")
+        df = self.link_ends if name == "link_ends" else getattr(self, name)
+        out = (df if cols is None else df[[c for c in cols if c in df.columns]]).iloc[pos].copy()
+        out["_cid"] = self.codes(name)[pos]
+        if name == "link_ends":
+            out["_pid"] = self.codes(name, "partner")[pos]
+        return out
+
+    def _positions(self, name, filtered, hgt2_only) -> np.ndarray:
+        df = self.link_ends if name == "link_ends" else getattr(self, name)
+        cid = self.codes(name)
+        if len(filtered) == len(self.contigs):          # no filter: every base contig
+            rows = cid >= 0
+            rows &= cid < len(self.contigs)
+        else:
+            mask = np.zeros(len(self.ids()) + 1, dtype=bool)   # last slot: code -1
+            mask[filtered.index.to_numpy()] = True
+            rows = mask[cid]
+        if hgt2_only:
+            rows &= df["is_hgt2"].to_numpy(dtype=bool)
+        return np.flatnonzero(rows)
 
     def has(self, name) -> bool:
         df = getattr(self, name, None)

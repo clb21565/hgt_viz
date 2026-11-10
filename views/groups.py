@@ -16,7 +16,8 @@ if R["group_id"].isna().all():
     st.stop()
 
 names = set(filtered["contig"])
-touch = R[R["contig"].isin(names) & R["group_id"].notna()]
+touch = store.subset("regions", filtered)
+touch = touch[touch["group_id"].notna()]
 if touch.empty:
     st.warning("No groups touch the filtered contigs.")
     st.stop()

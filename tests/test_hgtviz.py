@@ -98,6 +98,25 @@ def test_filters(demo):
         assert set(hit["contig"]) == set(e.loc[e["is_hgt2"] & (e["p_p"] == t), "contig"])
 
 
+def test_subset_matches_isin(demo):
+    """Coded subsets select the same rows as a string isin on contig names."""
+    drug = sorted(F.options(demo, "p")["drug_classes"])[:1]
+    for spec in [F.FilterSpec(), F.FilterSpec(require=["HGT2"]), F.FilterSpec(drug_classes=drug)]:
+        filt = F.apply(demo, spec)
+        names = set(filt["contig"])
+        for name in ["regions", "link_ends", "annotations"]:
+            df = demo.link_ends if name == "link_ends" else getattr(demo, name)
+            sub = demo.subset(name, filt)
+            assert sub.index.equals(df[df["contig"].isin(names)].index), (spec, name)
+            assert (demo.contigs["contig"].to_numpy()[sub["_cid"]] == sub["contig"].to_numpy()).all()
+        E = demo.subset("link_ends", filt, hgt2_only=True)
+        assert (demo.ids()[E["_pid"]] == E["partner"].to_numpy()).all()
+        assert E["is_hgt2"].all()
+    # natural sort at load
+    ids = demo.contigs["contig"].tolist()
+    assert ids.index("contig_2") < ids.index("contig_10") if {"contig_2", "contig_10"} <= set(ids) else True
+
+
 def test_missing_store(tmp_path):
     with pytest.raises(S.StoreError):
         S.load(str(tmp_path))

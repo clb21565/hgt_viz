@@ -149,20 +149,20 @@ def _detail(sel):
         if c_links.empty:
             st.caption("No partner contigs.")
         else:
-            pt = c_links.copy()
+            pt = c_links.reset_index(drop=True)
             pt["lineages differ at"] = pt["discordant_rank"].map(rank_name)
             cols = ["partner", f"p_{rank}", "lineages differ at", "region", "partner_region",
                     "start", "end", "partner_start", "partner_end", "strand", "identity",
                     "n_shared_orfs", "is_hgt2"]
             cols = [x for x in cols if x in pt.columns]
-            st.dataframe(pt[cols].rename(columns={f"p_{rank}": f"partner {RANK_NAMES[rank].lower()}"}),
-                         hide_index=True, width="stretch")
-            st.markdown("**Compare with a partner**")
-            labels = [f"{p} · {rg} ↔ {pr}" for p, rg, pr in
-                      zip(pt["partner"], pt["region"], pt["partner_region"])]
-            choice = st.selectbox("Link", ["—"] + labels, key=f"pair_{sel}", label_visibility="collapsed")
-            if choice != "—":
-                link = pt.iloc[labels.index(choice)]
+            st.caption("Select a row to compare the two contigs around the shared segment.")
+            ev = st.dataframe(pt[cols].rename(columns={f"p_{rank}": f"partner {RANK_NAMES[rank].lower()}"}),
+                              hide_index=True, width="stretch", height=300, on_select="rerun",
+                              selection_mode="single-row", key=f"pairs_{sel}_{show_all}")
+            prow = ev.selection.rows if ev else []
+            if prow:
+                link = pt.iloc[prow[0]]
+                choice = f"{link['partner']}_{link['region']}_{link['partner_region']}"
                 p = link["partner"]
                 p_len = store.rows_for("regions", p)["contig_length"]
                 p_len = int(p_len.iloc[0]) if len(p_len) else int(max(link["partner_end"], 1))

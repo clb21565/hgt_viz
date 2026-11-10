@@ -56,7 +56,7 @@ def _key(spec: FilterSpec):
 
 def apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
     """Return the rows of store.contigs that pass every filter (memoised per spec)."""
-    return store.memo(("apply", _key(spec)), lambda: _apply(store, spec))
+    return store.memo(("apply", _key(spec)), lambda: _apply(store, spec), maxsize=16, bucket="apply")
 
 
 def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
