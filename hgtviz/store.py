@@ -1,6 +1,8 @@
 """Load a store written by hgtviz.build."""
 import json
 import os
+import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -27,6 +29,31 @@ class Store:
     annotations: pd.DataFrame | None = None
     insitu: pd.DataFrame | None = None
     _ends: pd.DataFrame | None = field(default=None, repr=False)
+    _index: dict = field(default_factory=dict, repr=False)
+    cache: OrderedDict = field(default_factory=OrderedDict, repr=False)
+
+    def memo(self, key, fn, maxsize=64):
+        """Small LRU shared by all sessions (the store is read-only)."""
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        val = fn()
+        self.cache[key] = val
+        if len(self.cache) > maxsize:
+            self.cache.popitem(last=False)
+        return val
+
+    def rows_for(self, name, contig, col="contig") -> pd.DataFrame | None:
+        """Rows of table `name` whose `col` equals `contig`, via a positional index
+        built once per table instead of a full scan per lookup."""
+        df = self.link_ends if name == "link_ends" else getattr(self, name, None)
+        if df is None:
+            return None
+        key = (name, col)
+        if key not in self._index:
+            self._index[key] = df.groupby(col, sort=False, observed=True).indices
+        pos = self._index[key].get(contig)
+        return df.iloc[pos] if pos is not None else df.iloc[:0]
 
     def has(self, name) -> bool:
         df = getattr(self, name, None)
@@ -77,4 +104,15 @@ def load(path) -> Store:
     for req in ["contigs", "regions", "links", "dr"]:
         if tables[req] is None:
             raise StoreError(f"{path} is missing {req}.parquet; rebuild the store")
+    tables["contigs"] = natural_sort(tables["contigs"])
     return Store(path=path, meta=meta, **tables)
+
+
+def _natural_key(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def natural_sort(df: pd.DataFrame, col="contig") -> pd.DataFrame:
+    """contig_2 before contig_10. Done once at load so filtered views keep the order."""
+    order = sorted(range(len(df)), key=lambda i: _natural_key(str(df[col].iat[i])))
+    return df.iloc[order].reset_index(drop=True)

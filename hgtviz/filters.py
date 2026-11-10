@@ -1,6 +1,6 @@
 """Contig filters. Every filter narrows the set of base contigs; empty settings
 are ignored. Kept free of Streamlit so it can be unit-tested."""
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 
 import pandas as pd
 
@@ -50,8 +50,16 @@ def annotation_hits(store: Store, scope: str) -> pd.DataFrame:
     return a[a["in_region"]] if scope == "region" else a
 
 
+def _key(spec: FilterSpec):
+    return tuple(tuple(v) if isinstance(v, list) else v for v in astuple(spec))
+
+
 def apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
-    """Return the rows of store.contigs that pass every filter."""
+    """Return the rows of store.contigs that pass every filter (memoised per spec)."""
+    return store.memo(("apply", _key(spec)), lambda: _apply(store, spec))
+
+
+def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
     c = store.contigs
     keep = pd.Series(True, index=c.index)
 
@@ -99,9 +107,10 @@ def apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
         if spec.card_genes:
             sets.append(_contigs_with(A, (A["source"] == "card") & A["label"].isin(spec.card_genes)))
         if spec.drug_classes:
-            dc = A["category"].fillna("").str.split(";")
-            m = (A["source"] == "card") & dc.apply(lambda x: bool(set(x) & set(spec.drug_classes)))
-            sets.append(_contigs_with(A, m))
+            dc = A[["contig", "category"]].assign(category=A["category"].fillna("").str.split(";"))
+            dc = dc[(A["source"] == "card").to_numpy()].explode("category")
+            m = dc["category"].isin(spec.drug_classes)
+            sets.append(_contigs_with(dc, m))
         if spec.rip_families:
             sets.append(_contigs_with(A, (A["source"] == "ripdb") & A["label"].isin(spec.rip_families)))
 
@@ -111,7 +120,11 @@ def apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
 
 
 def options(store: Store, rank: str) -> dict:
-    """Choices for the multiselects."""
+    """Choices for the multiselects (memoised per rank)."""
+    return store.memo(("options", rank), lambda: _options(store, rank))
+
+
+def _options(store: Store, rank: str) -> dict:
     c, R = store.contigs, store.regions
     E = store.link_ends
     E = E[E["is_hgt2"]]
