@@ -62,6 +62,12 @@ Notes:
   `parA` / `parB` hits are labelled `partition`, all others `replication`.
 - Only genes and hits on base contigs and their link partners are kept, so the store
   stays small even for a large catalogue.
+- Gene maps open in **HGT evidence** colouring: a gene is HGT if its region has an
+  HGT1 call or it overlaps an HGT2 shared segment; its colour is the coarsest rank of
+  disagreement over both (one blue ramp: domain darkest, then phylum, class, order,
+  family-or-below). Regions carry labels like `HGT1 phylum · HGT2 phylum (13)`; hover
+  gives the taxa (region vs host, partner lineages), partner count and best identity.
+  Shared-segment ticks use the same ramp.
 - ORF clusters: two streaming passes give each store gene its cluster and the
   cluster's catalogue-wide size (copies) and spread (contigs). The gene map's
   "Identical ORFs" mode colours at most 4 clusters per view, numbered on the map (the

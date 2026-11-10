@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from . import RANK_NAMES
+from . import RANK_NAMES, RANKS
 from . import cog as COG
 
 # Categorical slots (fixed order, validated reference palette)
@@ -26,6 +26,28 @@ CLUSTER_COLORS = ["#2a78d6", "#eda100", "#008300", "#e34948"]
 SHARED_ORF = "#6b6a65"    # identical copy on another contig, beyond the 4 coloured clusters
 UNIQUE_ORF = "#d6d5d0"    # no identical copy anywhere in the catalogue
 SEGMENT = "#6b6a65"   # neutral: shared-segment ticks (blue is a gene colour in both modes)
+
+# HGT-evidence mode: one blue ramp, darker = deeper taxonomic disagreement. Seven
+# ranks do not fit as distinguishable steps (validated, --ordinal), so family, genus
+# and species share the lightest step; hover and region labels give the exact rank.
+HGT_LEVELS = {"d": "domain", "p": "phylum", "c": "class", "o": "order", "f": "family or below"}
+HGT_RAMP = {"d": "#0d366b", "p": "#1c5cab", "c": "#2a78d6", "o": "#5598e7", "f": "#86b6ef"}
+NO_HGT_REGION = "#a3a29c"   # in a kairos region without an HGT call
+NO_HGT = "#d6d5d0"          # outside kairos regions
+
+
+def _level(rank):
+    return None if not isinstance(rank, str) else ("f" if rank in "fgs" else rank)
+
+
+def _coarsest(ranks):
+    idx = [RANKS.index(r) for r in ranks if isinstance(r, str) and r in RANKS]
+    return RANKS[min(idx)] if idx else None
+
+
+def _rname(r):
+    return RANK_NAMES.get(r, r).lower() if isinstance(r, str) else ""
+
 
 GENE_H = 0.28      # half-height of a gene arrow
 BAND_H = 0.42      # half-height of a region band
@@ -95,6 +117,83 @@ def _arrows(df, y, xf, head):
     return xs, ys
 
 
+def annotate_hgt(genes, regions, links, host=None):
+    """HGT evidence per region and per gene, regardless of type.
+
+    HGT1: the gene's region has an HGT1 call (region taxonomy differs from the host
+    contig's). HGT2: the gene overlaps a shared segment with a contig of another
+    lineage. A gene's `hgt_rank` is the coarsest rank over both; `hgt_cat` is its
+    ramp level, or 'region' (in a kairos region, no call) / 'none'. Adds hover text
+    (`hgt_text`) and, on regions, a short label (`hgt_label`) such as
+    'HGT1 phylum · HGT2 phylum (13)'."""
+    regions = regions.copy()
+    L = links[links["is_hgt2"]] if links is not None and len(links) else None
+
+    def host_at(r):
+        return host[r] if host is not None and r in host and pd.notna(host[r]) else "?"
+
+    # regions
+    labels, h2r, details = [], [], []
+    for _, r in regions.iterrows():
+        parts, det = [], []
+        r1 = r.get("hgt1_rank")
+        if isinstance(r1, str):
+            parts.append(f"HGT1 {_rname(r1)}")
+            det.append(f"HGT1 at {_rname(r1)}: region {r.get(f'r_{r1}', '?')} vs host {host_at(r1)}")
+        rr = None
+        if L is not None:
+            lr = L[L["region"] == r["region_idx"]]
+            if len(lr):
+                rr = _coarsest(lr["discordant_rank"])
+                n = lr["partner"].nunique()
+                parts.append(f"HGT2 {_rname(rr)} ({n})")
+                det.append(f"HGT2 with {n} contig(s), coarsest at {_rname(rr)}: "
+                           + _taxa(lr[lr["discordant_rank"] == rr], rr)
+                           + (f"; best identity {lr['identity'].max():.1%}"
+                              if "identity" in lr and lr["identity"].notna().any() else ""))
+        h2r.append(rr)
+        labels.append(" · ".join(parts))
+        details.append("<br>".join(det))
+    regions["h2_rank"] = h2r
+    regions["hgt_label"] = labels
+    regions["hgt_detail"] = details
+    if genes is None:
+        return None, regions
+
+    # genes
+    g = genes.copy()
+    reg = regions.set_index("region_idx")
+    h1 = g["region_idx"].map(reg["hgt1_rank"]) if "region_idx" in g else pd.Series(None, index=g.index)
+    h2 = [None] * len(g)
+    h2txt = [""] * len(g)
+    if L is not None and {"start", "end"} <= set(L.columns) and L["start"].notna().any():
+        Ls = L.dropna(subset=["start", "end"])
+        S, E = Ls["start"].to_numpy(), Ls["end"].to_numpy()
+        rk = Ls["discordant_rank"].map(lambda x: RANKS.index(x) if x in RANKS else 99).to_numpy()
+        ov = (S[None, :] < g["end"].to_numpy()[:, None]) & (E[None, :] > g["start"].to_numpy()[:, None])
+        for i in np.flatnonzero(ov.any(axis=1)):
+            hit = Ls[ov[i]]
+            rr = RANKS[rk[ov[i]].min()] if rk[ov[i]].min() < 99 else None
+            h2[i] = rr
+            h2txt[i] = (f"HGT2: shared with {hit['partner'].nunique()} contig(s) of another lineage; "
+                        f"coarsest at {_rname(rr)}: {_taxa(hit[hit['discordant_rank'] == rr], rr)}")
+    g["hgt_rank"] = [_coarsest([a, b]) for a, b in zip(h1, h2)]
+    g["hgt_cat"] = [_level(r) or ("region" if isinstance(ri, str) else "none")
+                    for r, ri in zip(g["hgt_rank"], g.get("region_idx", [None] * len(g)))]
+    h1txt = [f"HGT1: region {reg.at[ri, f'r_{r}'] if f'r_{r}' in reg else '?'} vs host {host_at(r)} "
+             f"(differ at {_rname(r)})" if isinstance(r, str) else ""
+             for r, ri in zip(h1, g.get("region_idx", [None] * len(g)))]
+    g["hgt_text"] = ["<br>".join(x for x in (a, b) if x) for a, b in zip(h1txt, h2txt)]
+    return g, regions
+
+
+def _taxa(df, rank, k=3):
+    if df.empty or not isinstance(rank, str) or f"p_{rank}" not in df:
+        return "?"
+    v = df.drop_duplicates("partner")[f"p_{rank}"].value_counts()
+    return ", ".join(f"{t} ({n})" for t, n in v.head(k).items()) + (" …" if len(v) > k else "")
+
+
 def assign_clusters(frames, paired=False, n=len(CLUSTER_COLORS)):
     """Pick up to n ORF clusters to colour in this view and set each gene's `clcat`
     (cl1..cln / shared / unique). Single contig: clusters with copies on the most
@@ -137,9 +236,15 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
     for _, r in regions.iterrows():
         a, b = sorted((xf(r["start"]), xf(r["end"])))
         hgt1 = pd.notna(r.get("hgt1_rank"))
+        band = REGION if color_by == "hgt" else (HGT1 if hgt1 else REGION)
         fig.add_shape(type="rect", x0=a, x1=b, y0=y - BAND_H, y1=y + BAND_H,
-                      fillcolor=HGT1 if hgt1 else REGION, opacity=0.22, line_width=0,
-                      layer="below")
+                      fillcolor=band, opacity=0.22, line_width=0, layer="below")
+    if color_by == "hgt" and "hgt_label" in regions and (regions["hgt_label"] != "").any():
+        rl = regions[regions["hgt_label"] != ""]
+        fig.add_trace(go.Scatter(
+            x=[(xf(s) + xf(e)) / 2 for s, e in zip(rl["start"], rl["end"])],
+            y=[y + BAND_H + 0.1] * len(rl), mode="text", text=rl["hgt_label"],
+            textfont=dict(size=11, color="#52514e"), hoverinfo="skip", showlegend=False))
     # region hover: invisible points along the band
     if len(regions):
         mids = [(xf(s) + xf(e)) / 2 for s, e in zip(regions["start"], regions["end"])]
@@ -151,6 +256,9 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
     if genes is not None and len(genes):
         if color_by == "cog":
             layers = [(genes["cog_group"] == grp, c) for grp, c in COG_COLORS.items()]
+        elif color_by == "hgt":
+            layers = [(genes["hgt_cat"] == "none", NO_HGT), (genes["hgt_cat"] == "region", NO_HGT_REGION)]
+            layers += [(genes["hgt_cat"] == k, c) for k, c in reversed(list(HGT_RAMP.items()))]
         elif color_by == "cluster":
             layers = [(genes["clcat"] == "unique", UNIQUE_ORF), (genes["clcat"] == "shared", SHARED_ORF)]
             layers += [(genes["clcat"] == f"cl{i + 1}", c) for i, c in enumerate(CLUSTER_COLORS)]
@@ -175,12 +283,14 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
                     textfont=dict(size=11, color="#52514e"), hoverinfo="skip", showlegend=False))
         mid = [(xf(s) + xf(e)) / 2 for s, e in zip(genes["start"], genes["end"])]
         text = [f"<b>{o}</b><br>{s + 1:,}–{e:,} ({'+' if st > 0 else '−'})"
+                + (f"<br>{hg}" if hg else "")
                 + (f"<br>{an}" if an else "")
                 + (f"<br>{eg}" if eg else "")
                 + (f"<br>{cl}" if cl else "")
                 + (f"<br>region {ri}" if isinstance(ri, str) else "")
-                for o, s, e, st, an, eg, cl, ri in zip(
+                for o, s, e, st, hg, an, eg, cl, ri in zip(
                     genes["orf_id"], genes["start"], genes["end"], genes["strand"],
+                    genes.get("hgt_text", [""] * len(genes)),
                     genes["annotation"], genes.get("eggnog", [""] * len(genes)),
                     genes.get("cl_text", [""] * len(genes)),
                     genes.get("region_idx", [None] * len(genes)))]
@@ -195,7 +305,9 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
 def _region_hover(r):
     rank = r.get("hgt1_rank")
     lines = [f"<b>{r['region_idx']}</b>", f"{r['start'] + 1:,}–{r['end']:,} bp ({r['region_type']})"]
-    if pd.notna(rank):
+    if isinstance(r.get("hgt_detail"), str) and r["hgt_detail"]:
+        lines.append(r["hgt_detail"])
+    elif pd.notna(rank):
         lines.append(f"HGT1 at {RANK_NAMES.get(rank, rank).lower()} level")
     if pd.notna(r.get("region_taxon")):
         lines.append(f"region taxon: {r['region_taxon']}")
@@ -211,9 +323,12 @@ def _legend(fig, cats, clusters=None):
                                  marker=dict(size=11, color=color, symbol="square")))
     for name, color in ([("CARD hit", CARD), ("RIP-DB hit", RIP), ("other gene", GENE)]
                         + list(COG_COLORS.items())
+                        + [(f"HGT: {n}", HGT_RAMP[k]) for k, n in HGT_LEVELS.items()]
+                        + [("kairos region, no HGT call", NO_HGT_REGION), ("no HGT evidence", NO_HGT)]
                         + [("identical copy on another contig", SHARED_ORF),
                            ("unique ORF (no identical copy)", UNIQUE_ORF)]
-                        + [("HGT1 region", HGT1), ("other kairos region", REGION)]):
+                        + [("HGT1 region", HGT1), ("other kairos region", REGION),
+                           ("kairos region", REGION)]):
         if name in cats:
             fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=name,
                                      marker=dict(size=11, color=color, symbol="square",
@@ -236,6 +351,10 @@ def _gene_cats(genes, color_by):
         return set()
     if color_by == "cog":
         return set(genes["cog_group"].unique())
+    if color_by == "hgt":
+        return {f"HGT: {HGT_LEVELS[c]}" if c in HGT_LEVELS else
+                {"region": "kairos region, no HGT call", "none": "no HGT evidence"}[c]
+                for c in genes["hgt_cat"].unique()}
     if color_by == "cluster":
         names = {"unique": "unique ORF (no identical copy)",
                  "shared": "identical copy on another contig"}
@@ -254,27 +373,36 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None, color_b
               color_by=color_by)
     if links is not None and len(links):
         # one tick per distinct shared segment, stacked to avoid overlap
-        segs = (links.groupby(["start", "end"])
-                .agg(n=("partner", "nunique"), partners=("partner", lambda s: ", ".join(sorted(set(s))[:6])))
+        lk = links.assign(_r=links["discordant_rank"].where(links["is_hgt2"]))
+        segs = (lk.groupby(["start", "end"])
+                .agg(n=("partner", "nunique"), partners=("partner", lambda s: ", ".join(sorted(set(s))[:6])),
+                     rank=("_r", lambda s: _coarsest(s)))
                 .reset_index())
-        xs, ys = [], []
+        by_color = {}
         for i, (_, s) in enumerate(segs.iterrows()):
             yy = 0.35 - 0.12 * (i % 3)
+            color = (HGT_RAMP[_level(s["rank"])] if color_by == "hgt" and isinstance(s["rank"], str)
+                     else SEGMENT)
+            xs, ys = by_color.setdefault(color, ([], []))
             xs += [s["start"], s["end"], None]
             ys += [yy, yy, None]
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=SEGMENT, width=4),
-                                 hoverinfo="skip", showlegend=False))
+        for color, (xs, ys) in by_color.items():
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=4),
+                                     hoverinfo="skip", showlegend=False))
         fig.add_trace(go.Scatter(
             x=(segs["start"] + segs["end"]) / 2,
             y=[0.35 - 0.12 * (i % 3) for i in range(len(segs))], mode="markers",
             marker=dict(size=12, opacity=0),
-            text=[f"shared with {n} contig(s)<br>{p}" for n, p in zip(segs["n"], segs["partners"])],
+            text=[f"shared with {n} contig(s)<br>{p}"
+                  + (f"<br>HGT2, coarsest at {_rname(r)}" if isinstance(r, str) else "<br>same lineage (not HGT2)")
+                  for n, p, r in zip(segs["n"], segs["partners"], segs["rank"])],
             hovertemplate="%{text}<extra></extra>", showlegend=False))
         fig.add_annotation(x=0, y=0.5, text="shared segments", showarrow=False, xanchor="left",
                            font=dict(size=11, color="#52514e"))
     cats = _gene_cats(genes, color_by) or {"other gene"}
     if len(regions):
-        cats |= {"HGT1 region" if pd.notna(x) else "other kairos region" for x in regions["hgt1_rank"]}
+        cats |= ({"kairos region"} if color_by == "hgt" else
+                 {"HGT1 region" if pd.notna(x) else "other kairos region" for x in regions["hgt1_rank"]})
     _legend(fig, cats, clusters)
     _layout(fig, 260, x_range or [0, length])
     fig.update_yaxes(range=[0, 1.65])
@@ -333,7 +461,8 @@ def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad
     strand_note = " (reverse complement)" if int(link.get("strand", 1) or 1) < 0 else ""
     add_track(fig, genes2, regions2, y2, f"{c2} · {len2:,} bp{strand_note}", len2, xf=xf2,
               x_range=x_range, color_by=color_by)
-    cats = {"HGT1 region", "other kairos region"} | _gene_cats(genes1, color_by) \
+    cats = ({"kairos region"} if color_by == "hgt" else {"HGT1 region", "other kairos region"}) \
+        | _gene_cats(genes1, color_by) \
         | _gene_cats(genes2, color_by)
     _legend(fig, cats, clusters)
     _layout(fig, 340, x_range, xtitle=f"Position on {c1} (bp)")

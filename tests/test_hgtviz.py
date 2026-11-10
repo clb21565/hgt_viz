@@ -180,6 +180,26 @@ def test_orf_clusters(demo):
     assert (a.loc[a["cl_contigs"] == 1, "clcat"] == "unique").all()
 
 
+def test_hgt_evidence(demo):
+    from hgtviz import genemap as G
+    from hgtviz import RANKS
+    c = demo.contigs[demo.contigs["hgt1"] | demo.contigs["hgt2"]].iloc[0]
+    sel = c["contig"]
+    links = demo.rows_for("link_ends", sel)
+    g, r = G.annotate_hgt(G.gene_category(demo.rows_for("genes", sel), None),
+                          demo.rows_for("regions", sel), links, c)
+    # every HGT1 region's genes carry at least that rank (coarsest wins)
+    for _, reg in r[r["hgt1_rank"].notna()].iterrows():
+        gr = g[g["region_idx"] == reg["region_idx"]]
+        assert (gr["hgt_rank"].map(RANKS.index) <= RANKS.index(reg["hgt1_rank"])).all()
+        assert "HGT1" in reg["hgt_label"]
+    # genes outside regions and not on an HGT2 segment have no evidence
+    assert set(g.loc[g["hgt_rank"].isna(), "hgt_cat"]) <= {"none", "region"}
+    assert set(g["hgt_cat"]) <= {"none", "region", "d", "p", "c", "o", "f"}
+    if links["is_hgt2"].any():
+        assert (r["h2_rank"].notna()).any() and g["hgt_text"].str.contains("HGT2").any()
+
+
 def test_missing_store(tmp_path):
     with pytest.raises(S.StoreError):
         S.load(str(tmp_path))

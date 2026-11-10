@@ -111,6 +111,7 @@ def _detail(sel):
     c_egg = store.eggnog_for(sel) if store.has("eggnog") else None
     if c_genes is not None:
         c_genes = G.gene_category(c_genes, c_ann, c_egg)
+    c_genes, c_regions_h = G.annotate_hgt(c_genes, c_regions, store.rows_for("link_ends", sel), c)
 
     m = st.columns(6)
     m[0].metric("Kairos regions", len(c_regions))
@@ -124,7 +125,7 @@ def _detail(sel):
     zoom_opts = ["Whole contig"] + c_regions["region_idx"].tolist()
     zc = st.columns([2, 3])
     zoom = zc[0].selectbox("Zoom to", zoom_opts, key=f"zoom_{sel}")
-    color_opts = {"CARD / RIP-DB hits": "hits"}
+    color_opts = {"HGT evidence": "hgt", "CARD / RIP-DB hits": "hits"}
     if store.has("eggnog"):
         color_opts["COG group (eggNOG)"] = "cog"
     if store.has("genes") and "cluster" in store.genes.columns:
@@ -136,7 +137,7 @@ def _detail(sel):
         r = c_regions.set_index("region_idx").loc[zoom]
         pad = max(2000, int((r["end"] - r["start"]) * 0.3))
         x_range = [max(0, r["start"] - pad), min(length, r["end"] + pad)]
-    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions, c_links, x_range=x_range,
+    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions_h, c_links, x_range=x_range,
                                  color_by=color_by),
                     width="stretch", key=f"map_{sel}_{zoom}_{color_by}")
     if c_genes is None:
@@ -182,8 +183,11 @@ def _detail(sel):
                 if p_genes is not None:
                     p_egg = store.eggnog_for(p) if store.has("eggnog") else None
                     p_genes = G.gene_category(p_genes, p_ann, p_egg)
+                p_host = store.rows_for("contigs", p)
+                p_genes, p_regions = G.annotate_hgt(p_genes, p_regions, store.rows_for("link_ends", p),
+                                                    p_host.iloc[0] if len(p_host) else None)
                 pad = st.slider("Flank (bp)", 0, 50000, 5000, 1000, key=f"pad_{sel}")
-                st.plotly_chart(G.paired_map(sel, length, c_genes, c_regions, p, p_len, p_genes,
+                st.plotly_chart(G.paired_map(sel, length, c_genes, c_regions_h, p, p_len, p_genes,
                                              p_regions, link, pad=pad, color_by=color_by),
                                 width="stretch", key=f"pairfig_{sel}_{choice}_{color_by}")
 
