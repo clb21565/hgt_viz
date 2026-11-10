@@ -13,14 +13,15 @@ in situ calls.
 
 | Page | What it shows |
 |------|---------------|
-| **Contig browser** | Filterable contig table, TSV exports of the filtered set, and for the selected contig: a gene map (regions, CARD and RIP-DB hits, shared segments), tabs for regions, partners (with an aligned two-contig view), donor–recipient pairs, groups, annotations and in situ calls |
-| **Summary** | For the filtered contigs: rank of the HGT calls, HGT1 region → host taxon matrix, HGT2 contig ↔ partner matrix, CARD genes / drug classes / RIP-DB families inside vs. outside kairos regions |
+| **Contig browser** | Filterable contig table, TSV exports of the filtered set, and for the selected contig: a gene map (regions, shared segments; genes coloured by CARD / RIP-DB hit or by eggNOG COG group, eggNOG name and description on hover), tabs for regions, partners (select a row for an aligned two-contig view), donor–recipient pairs, groups, annotations (CARD / RIP-DB and eggNOG) and in situ calls |
+| **Summary** | For the filtered contigs: rank of the HGT calls, HGT1 region → host taxon matrix, HGT2 contig ↔ partner matrix, COG categories inside vs. outside kairos regions, CARD genes / drug classes / RIP-DB families inside vs. outside kairos regions |
 | **HGT groups** | Groups that touch the filtered contigs, their CARD / RIP-DB content, member regions, and a button to filter the browser to one group |
 
 Sidebar filters apply to every page: contig ID, required evidence (HGT1, HGT2,
 donor–recipient, in situ), host / HGT1-region / HGT2-partner taxon at any rank, rank
 of the HGT1 and HGT2 calls, HGT group and group size, contig length, CARD gene, CARD
-drug class and RIP-DB family (anywhere on the contig, or only inside a kairos region).
+drug class, RIP-DB family, COG category and eggNOG text (name, description, KO, Pfam,
+CAZy, EC) — anywhere on the contig, or only inside a kairos region.
 
 ## 1. Build a store
 
@@ -45,6 +46,7 @@ Inputs (under `results/detect/`, prefix = catalogue name, auto-detected):
 | `NAME.hgt/` (get_hgt-v2.py outputs) | | HGT1 / HGT2 calls, groups, donor–recipient pairs |
 | `NAME.ffn_coords.tsv` | | gene coordinates |
 | `NAME-card.tsv`, `NAME-ripdb.tsv` | | diamond best hits (`qtitle stitle pident bitscore evalue`) |
+| `NAME.faa.eggs.emapper.annotations` | | eggNOG-mapper 2.0 / 2.1 output (`--eggnog` to point elsewhere) |
 | `results/call/insitu_events.tsv` | | in situ calls |
 
 Notes:
@@ -59,6 +61,12 @@ Notes:
   `parA` / `parB` hits are labelled `partition`, all others `replication`.
 - Only genes and hits on base contigs and their link partners are kept, so the store
   stays small even for a large catalogue.
+- eggNOG: the file is streamed in chunks and reduced to the genes in the store and the
+  columns name, description, COG category, KEGG KO, Pfam, CAZy, EC, e-value (GO terms
+  and KEGG pathways are dropped). `eggnog.parquet` is sorted by contig and the app reads
+  it one contig at a time; it is never loaded whole. `cog_counts.parquet` (genes per
+  base contig × COG letter × inside/outside a region) drives the COG filter and the
+  Summary chart.
 
 ## 2. Run the app
 

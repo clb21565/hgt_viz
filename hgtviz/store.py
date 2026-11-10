@@ -7,10 +7,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from . import RANKS
 
-TABLES = ["contigs", "regions", "links", "dr", "groups", "genes", "annotations", "insitu"]
+TABLES = ["contigs", "regions", "links", "dr", "groups", "genes", "annotations", "insitu",
+          "cog_counts"]
+LAZY = ["eggnog"]   # large; read per contig from Parquet, never loaded whole
+EGGNOG_SEARCH_COLS = ["preferred_name", "description", "kegg_ko", "pfams", "cazy", "ec"]
 
 
 class StoreError(Exception):
@@ -29,6 +34,7 @@ class Store:
     genes: pd.DataFrame | None = None
     annotations: pd.DataFrame | None = None
     insitu: pd.DataFrame | None = None
+    cog_counts: pd.DataFrame | None = None
     _ends: pd.DataFrame | None = field(default=None, repr=False)
     _index: dict = field(default_factory=dict, repr=False)
     caches: dict = field(default_factory=dict, repr=False)
@@ -108,7 +114,46 @@ class Store:
             rows &= df["is_hgt2"].to_numpy(dtype=bool)
         return np.flatnonzero(rows)
 
+    # ── eggNOG (lazy) ──────────────────────────────────────────────────────────
+    @property
+    def eggnog_path(self) -> str | None:
+        p = os.path.join(self.path, "eggnog.parquet")
+        return p if os.path.exists(p) else None
+
+    def eggnog_for(self, contig: str) -> pd.DataFrame | None:
+        """eggNOG rows of one contig. The file is sorted by contig with small row
+        groups, so the min/max statistics let pyarrow read one or two of them."""
+        if self.eggnog_path is None:
+            return None
+        return self.memo(("eggnog", contig), lambda: pq.read_table(
+            self.eggnog_path, filters=[("contig", "==", contig)]).to_pandas(),
+            maxsize=256, bucket="eggnog")
+
+    def eggnog_search(self, text: str, region_only=False) -> set:
+        """Contigs with a gene whose eggNOG name, description, KO, Pfam, CAZy or EC
+        contains `text` (case-insensitive). Scans those columns once per query."""
+        def run():
+            hits = set()
+            cols = ["contig", "in_region"] + EGGNOG_SEARCH_COLS
+            pf = pq.ParquetFile(self.eggnog_path)
+            for i in range(pf.num_row_groups):
+                t = pf.read_row_group(i, columns=cols)
+                m = None
+                for c in EGGNOG_SEARCH_COLS:
+                    x = pc.fill_null(pc.match_substring(t[c], text, ignore_case=True), False)
+                    m = x if m is None else pc.or_(m, x)
+                if region_only:
+                    m = pc.and_(m, pc.fill_null(t["in_region"], False))
+                hits.update(pc.unique(pc.filter(t["contig"], m)).to_pylist())
+            return hits
+        if self.eggnog_path is None or not text:
+            return set()
+        return self.memo(("eggnog_search", text.lower(), region_only), run, maxsize=32,
+                         bucket="eggnog_search")
+
     def has(self, name) -> bool:
+        if name == "eggnog":
+            return self.eggnog_path is not None
         df = getattr(self, name, None)
         return df is not None and len(df) > 0
 

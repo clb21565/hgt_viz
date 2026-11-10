@@ -108,8 +108,9 @@ def _detail(sel):
     c_dr = store.dr[(store.dr["recipient"] == sel) | (store.dr["donor"] == sel)]
     c_ann = store.rows_for("annotations", sel) if store.has("annotations") else None
     c_genes = store.rows_for("genes", sel) if store.has("genes") else None
+    c_egg = store.eggnog_for(sel) if store.has("eggnog") else None
     if c_genes is not None:
-        c_genes = G.gene_category(c_genes, c_ann)
+        c_genes = G.gene_category(c_genes, c_ann, c_egg)
 
     m = st.columns(6)
     m[0].metric("Kairos regions", len(c_regions))
@@ -121,14 +122,21 @@ def _detail(sel):
 
     # gene map with optional zoom to a region
     zoom_opts = ["Whole contig"] + c_regions["region_idx"].tolist()
-    zoom = st.selectbox("Zoom to", zoom_opts, key=f"zoom_{sel}")
+    zc = st.columns([3, 2])
+    zoom = zc[0].selectbox("Zoom to", zoom_opts, key=f"zoom_{sel}")
+    color_opts = {"CARD / RIP-DB hits": "hits"}
+    if store.has("eggnog"):
+        color_opts["COG group (eggNOG)"] = "cog"
+    color_by = color_opts[zc[1].radio("Colour genes by", list(color_opts), horizontal=True,
+                                      key="color_by")]
     x_range = None
     if zoom != "Whole contig":
         r = c_regions.set_index("region_idx").loc[zoom]
         pad = max(2000, int((r["end"] - r["start"]) * 0.3))
         x_range = [max(0, r["start"] - pad), min(length, r["end"] + pad)]
-    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions, c_links, x_range=x_range),
-                    width="stretch", key=f"map_{sel}_{zoom}")
+    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions, c_links, x_range=x_range,
+                                 color_by=color_by),
+                    width="stretch", key=f"map_{sel}_{zoom}_{color_by}")
     if c_genes is None:
         st.caption("No gene coordinates in this store (ffn_coords.tsv was not found at build time).")
 
@@ -170,11 +178,12 @@ def _detail(sel):
                 p_ann = store.rows_for("annotations", p) if store.has("annotations") else None
                 p_genes = store.rows_for("genes", p) if store.has("genes") else None
                 if p_genes is not None:
-                    p_genes = G.gene_category(p_genes, p_ann)
+                    p_egg = store.eggnog_for(p) if store.has("eggnog") else None
+                    p_genes = G.gene_category(p_genes, p_ann, p_egg)
                 pad = st.slider("Flank (bp)", 0, 50000, 5000, 1000, key=f"pad_{sel}")
                 st.plotly_chart(G.paired_map(sel, length, c_genes, c_regions, p, p_len, p_genes,
-                                             p_regions, link, pad=pad),
-                                width="stretch", key=f"pairfig_{sel}_{choice}")
+                                             p_regions, link, pad=pad, color_by=color_by),
+                                width="stretch", key=f"pairfig_{sel}_{choice}_{color_by}")
 
     with tabs[2]:
         if c_dr.empty:
@@ -199,13 +208,32 @@ def _detail(sel):
                        "Open the HGT groups page for the full member list.")
 
     with tabs[4]:
+        st.markdown("**CARD / RIP-DB**")
         if c_ann is None or c_ann.empty:
             st.caption("No CARD or RIP-DB hits on this contig.")
         else:
             st.dataframe(c_ann[["orf_id", "source", "label", "accession", "family", "category",
                                 "mechanism", "pident", "bitscore", "evalue", "region_idx"]]
                          .sort_values(["source", "orf_id"]),
-                         hide_index=True, width="stretch")
+                         hide_index=True, width="stretch",
+                         column_config={"evalue": st.column_config.NumberColumn(format="%.1e")})
+        if store.has("eggnog"):
+            st.markdown("**eggNOG**")
+            if c_egg is None or c_egg.empty:
+                st.caption("No eggNOG annotations on this contig.")
+            else:
+                only = st.toggle("Only genes inside kairos regions", value=True, key=f"egg_reg_{sel}")
+                e = c_egg[c_egg["in_region"]] if only else c_egg
+                e = e.assign(_n=pd.to_numeric(e["orf_id"].str.rsplit("_", n=1).str[-1], errors="coerce")).sort_values("_n")
+                tcols = ["orf_id", "region_idx", "preferred_name", "description", "cog_category",
+                         "kegg_ko", "pfams", "cazy", "ec"]
+                e = e[tcols + ["evalue"]].astype({c: "object" for c in tcols})
+                e[tcols] = e[tcols].where(e[tcols].notna(), "")
+                st.dataframe(e,
+                             hide_index=True, width="stretch",
+                             column_config={"evalue": st.column_config.NumberColumn(format="%.1e")})
+                st.caption(f"{len(c_egg):,} of {len(c_genes) if c_genes is not None else '?'} "
+                           f"genes on this contig have an eggNOG hit.")
 
     if store.has("insitu"):
         with tabs[5]:

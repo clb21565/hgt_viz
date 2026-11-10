@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from hgtviz import RANK_NAMES, RANKS
+from hgtviz import cog as COG
 from hgtviz.genemap import CARD, RIP, SEQ_BLUE
 
 store = st.session_state["store"]
@@ -104,6 +105,41 @@ with right:
 
 # ── function ─────────────────────────────────────────────────────────────────
 st.subheader("Function")
+
+
+def cog_section():
+    st.markdown("**COG categories (eggNOG): inside kairos regions vs. elsewhere**")
+    cc = store.subset("cog_counts", filtered, cols=["cog", "in_region", "n"])
+    if cc.empty:
+        st.caption("No genes on these contigs.")
+        return
+    tot = cc.groupby("in_region")["n"].sum().reindex([True, False], fill_value=0)
+    t = (cc[cc["cog"] != "-"].groupby(["cog", "in_region"])["n"].sum().unstack(fill_value=0)
+         .reindex(columns=[True, False], fill_value=0))
+    share = t.div(tot.replace(0, np.nan), axis=1) * 100
+    share = share.loc[share[True].sort_values().index]   # largest in-region share on top
+    labels = [f"{c}: {COG.COG[c]}" for c in share.index]
+    ratio = (share[True] / share[False].replace(0, np.nan)).round(2)
+    fig = go.Figure()
+    # horizontal groups draw the first trace lowest: add "elsewhere" first, reverse the legend
+    for flag, name, color in [(False, "elsewhere", RIP), (True, "inside a kairos region", CARD)]:
+        fig.add_bar(y=labels, x=share[flag], name=name, orientation="h", marker_color=color,
+                    customdata=np.stack([t[flag], ratio.fillna(0)], axis=1),
+                    hovertemplate="%{y}<br>%{x:.1f}% of genes (%{customdata[0]:,})"
+                                  "<br>inside/elsewhere ratio %{customdata[1]}<extra>" + name + "</extra>")
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.08, xaxis_title="% of genes",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, traceorder="reversed"))
+    st.plotly_chart(_layout(fig, max(320, 30 * len(share) + 120)), width="stretch")
+    none = cc[cc["cog"] == "-"].groupby("in_region")["n"].sum().reindex([True, False], fill_value=0)
+    st.caption(f"{int(tot[True]):,} genes inside regions, {int(tot[False]):,} elsewhere; "
+               f"{none[True] / max(tot[True], 1):.0%} / {none[False] / max(tot[False], 1):.0%} without a "
+               "COG category. Genes with several letters count once per letter, so bars can sum "
+               "past 100%.")
+
+
+if store.has("eggnog") and store.cog_counts is not None:
+    cog_section()
+
 if A is None or A.empty:
     st.caption("No CARD / RIP-DB annotations on these contigs.")
     st.stop()

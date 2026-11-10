@@ -117,6 +117,51 @@ def test_subset_matches_isin(demo):
     assert ids.index("contig_2") < ids.index("contig_10") if {"contig_2", "contig_10"} <= set(ids) else True
 
 
+def test_eggnog(demo):
+    from hgtviz import cog as COG
+    assert demo.has("eggnog") and demo.cog_counts is not None
+    c = demo.contigs["contig"].iloc[0]
+    e = demo.eggnog_for(c)
+    assert len(e) and (e["contig"] == c).all()
+    # cog_counts: one row-sum per gene per letter, all genes accounted for
+    cc = demo.cog_counts
+    base = demo.genes[demo.genes["contig"].isin(set(demo.contigs["contig"]))]   # counts: base contigs
+    per_gene = base.merge(pd.read_parquet(demo.eggnog_path, columns=["orf_id", "cog_category"]),
+                                on="orf_id", how="left")
+    n_letters = per_gene["cog_category"].map(lambda x: max(len(COG.letters(x)), 1)).sum()
+    assert cc["n"].sum() == n_letters
+    # COG filter and text search agree with the eggNOG table
+    eg = pd.read_parquet(demo.eggnog_path)
+    eg = eg[eg["contig"].isin(set(demo.contigs["contig"]))]   # eggnog also covers partners
+    hit = F.apply(demo, F.FilterSpec(cog_letters=["X"]))
+    assert set(hit["contig"]) == set(eg.loc[eg["cog_category"].str.contains("X", na=False), "contig"])
+    t = F.apply(demo, F.FilterSpec(eggnog_text="TRANSPOSASE"))
+    assert set(t["contig"]) == set(eg.loc[eg["description"].str.contains("ransposase", na=False), "contig"])
+    t_in = F.apply(demo, F.FilterSpec(eggnog_text="transposase", function_scope="region"))
+    assert set(t_in["contig"]) <= set(t["contig"])
+    assert COG.group("KX") == COG.MOBILE and COG.group("SK") == COG.INFO
+    assert COG.group(None) == COG.NONE and COG.group("RS") == COG.POOR
+
+
+def test_emapper_v2_0_header(tmp_path):
+    from hgtviz.build import load_eggnog
+    path = tmp_path / "x.emapper.annotations"
+    cols = ["query_name", "seed_eggNOG_ortholog", "seed_ortholog_evalue", "seed_ortholog_score",
+            "best_tax_level", "Preferred_name", "GOs", "EC", "KEGG_ko", "KEGG_Pathway",
+            "KEGG_Module", "KEGG_Reaction", "KEGG_rclass", "BRITE", "KEGG_TC", "CAZy",
+            "BiGG_Reaction", "taxonomic scope", "eggNOG OGs", "best eggNOG OG",
+            "COG Functional cat.", "eggNOG free text desc."]
+    row = ["c1_1", "x", "1e-30", "99", "Bacteria", "tnpA", "-", "-", "ko:K07483"] + ["-"] * 8 \
+        + ["bact", "-", "-", "X", "Transposase"]
+    path.write_text("# emapper 2.0\n# x\n#" + "\t".join(cols) + "\n" + "\t".join(row) + "\n"
+                    + "# done\n")
+    genes = pd.DataFrame({"orf_id": ["c1_1", "c1_2"], "contig": ["c1", "c1"],
+                          "region_idx": ["r1", None]})
+    eg = load_eggnog(str(path), genes, log=lambda *_: None)
+    assert eg.loc[0, "preferred_name"] == "tnpA" and eg.loc[0, "cog_category"] == "X"
+    assert eg.loc[0, "description"] == "Transposase" and bool(eg.loc[0, "in_region"])
+
+
 def test_missing_store(tmp_path):
     with pytest.raises(S.StoreError):
         S.load(str(tmp_path))

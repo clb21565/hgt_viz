@@ -8,7 +8,7 @@ Everything is synthetic: taxa, contigs, mobile elements, CARD and RIP-DB hits
                            assignRes2, potential_hgt_regions.taxonomy,
                            ffn_coords}.tsv
   OUT/results/detect/NAME.features/events.tsv
-  OUT/results/detect/NAME-card.tsv, NAME-ripdb.tsv
+  OUT/results/detect/NAME-card.tsv, NAME-ripdb.tsv, NAME.faa.eggs.emapper.annotations
   OUT/results/call/insitu_events.tsv
   OUT/aro_index.tsv
 
@@ -250,6 +250,9 @@ def main():
                   for n, fam, dc, mech in CARD_GENES]).to_csv(
         os.path.join(a.out, "aro_index.tsv"), sep="\t", index=False)
 
+    write_emapper(f"{det}.faa.eggs.emapper.annotations", genes, region_orfs, elements, card,
+                  rip, rng)
+
     # a handful of in situ calls on random events
     ins = []
     for e in rng.sample(ev, min(40, len(ev))):
@@ -266,6 +269,61 @@ def main():
         subprocess.run([sys.executable, a.get_hgt, "--path", det_dir + "/", "--sample", a.name,
                         "--out-dir", f"{det}.hgt"], check=True, stdout=subprocess.DEVNULL)
         print(f"get_hgt-v2.py outputs in {det}.hgt/")
+
+
+EMAPPER_COLS = ["query", "seed_ortholog", "evalue", "score", "eggNOG_OGs", "max_annot_lvl",
+                "COG_category", "Description", "Preferred_name", "GOs", "EC", "KEGG_ko",
+                "KEGG_Pathway", "KEGG_Module", "KEGG_Reaction", "KEGG_rclass", "BRITE", "KEGG_TC",
+                "CAZy", "BiGG_Reaction", "PFAMs"]
+# (COG, preferred name, description, KO, Pfam)
+MOBILE = [("X", "tnpA", "Transposase", "ko:K07483", "DDE_Tnp_1"),
+          ("L", "intI", "Integrase, site-specific recombinase", "ko:K04763", "Phage_integrase"),
+          ("X", "-", "Phage integrase family", "-", "Phage_int_SAM_3,Phage_integrase"),
+          ("L", "repA", "Replication protein", "-", "Rep_3"),
+          ("U", "traG", "Type IV secretion system protein", "ko:K12056", "TraG-D_C"),
+          ("S", "-", "Protein of unknown function (DUF3854)", "-", "DUF3854"),
+          ("K", "-", "Helix-turn-helix domain", "-", "HTH_17")]
+CHROM = [("J", "rpsL", "30S ribosomal protein S12", "ko:K02950", "Ribosom_S12_S23"),
+         ("E", "argH", "Argininosuccinate lyase", "ko:K01755", "Lyase_1,ASL_C2"),
+         ("C", "atpD", "ATP synthase subunit beta", "ko:K02112", "ATP-synt_ab"),
+         ("G", "pgk", "Phosphoglycerate kinase", "ko:K00927", "PGK"),
+         ("M", "murA", "UDP-N-acetylglucosamine 1-carboxyvinyltransferase", "ko:K00790", "EPSP_synthase"),
+         ("T", "-", "Histidine kinase", "-", "HisKA,HATPase_c"),
+         ("K", "rpoB", "DNA-directed RNA polymerase subunit beta", "ko:K03043", "RNA_pol_Rpb2_1"),
+         ("H", "folP", "Dihydropteroate synthase", "ko:K00796", "Pterin_bind"),
+         ("P", "-", "ABC transporter", "-", "ABC_tran"),
+         ("S", "-", "Domain of unknown function", "-", "DUF4130"),
+         ("-", "-", "-", "-", "-")]
+
+
+def write_emapper(path, genes, region_orfs, elements, card, rip, rng):
+    """emapper 2.1-style annotations for ~80% of genes: element genes draw from
+    mobile-element functions, CARD/RIP-DB hits get matching COGs."""
+    special = {}
+    for row in card:
+        special[row[0].split(" ")[0]] = ("V", "-", "Antibiotic resistance protein", "-", "-")
+    for row in rip:
+        special[row[0].split(" ")[0]] = ("L", "repB", "Plasmid replication initiator", "-", "Rep_trans")
+    mobile_orfs = {o for kind, _, orfs in region_orfs.values() if kind == "el" for o in orfs}
+    with open(path, "w") as fh:
+        fh.write("## emapper-2.1.12\n## demo\n##\n")
+        fh.write("#" + "\t".join(EMAPPER_COLS) + "\n")
+        n = 0
+        for g in genes:
+            orf = g[0]
+            if orf in special:
+                cog, name, desc, ko, pfam = special[orf]
+            elif rng.random() < 0.2:
+                continue
+            else:
+                cog, name, desc, ko, pfam = rng.choice(MOBILE if orf in mobile_orfs else CHROM)
+            row = [orf, f"1234.SEED{n}", f"{rng.uniform(1e-80, 1e-20):.2e}", f"{rng.uniform(50, 900):.1f}",
+                   "COG0001@1|root,COG0001@2|Bacteria", "2|Bacteria", cog, desc, name,
+                   "GO:0003674,GO:0005575" if rng.random() < 0.3 else "-", "-", ko,
+                   "-", "-", "-", "-", "-", "-", "-", "-", pfam]
+            fh.write("\t".join(row) + "\n")
+            n += 1
+        fh.write(f"## {n} queries scanned\n## Total time (seconds): 1.0\n")
 
 
 if __name__ == "__main__":

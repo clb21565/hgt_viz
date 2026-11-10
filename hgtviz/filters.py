@@ -22,6 +22,8 @@ class FilterSpec:
     card_genes: list = field(default_factory=list)
     drug_classes: list = field(default_factory=list)
     rip_families: list = field(default_factory=list)
+    cog_letters: list = field(default_factory=list)   # COG categories (any of)
+    eggnog_text: str = ""            # substring of eggNOG name/description/KO/Pfam/CAZy/EC
     function_scope: str = "contig"   # "contig" or "region" (inside a kairos region)
     min_length: int = 0
     min_partners: int = 0
@@ -30,7 +32,8 @@ class FilterSpec:
         """Human-readable list of the filters that are set."""
         out = []
         for name in ["search", "require", "hgt1_ranks", "hgt2_ranks", "contig_taxa", "region_taxa",
-                     "partner_taxa", "groups", "card_genes", "drug_classes", "rip_families"]:
+                     "partner_taxa", "groups", "card_genes", "drug_classes", "rip_families",
+                     "cog_letters", "eggnog_text"]:
             if getattr(self, name):
                 out.append(name)
         for name in ["min_group_size", "min_length", "min_partners"]:
@@ -114,6 +117,15 @@ def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
         if spec.rip_families:
             sets.append(_contigs_with(A, (A["source"] == "ripdb") & A["label"].isin(spec.rip_families)))
 
+    if spec.cog_letters and store.cog_counts is not None:
+        cc = store.cog_counts
+        m = cc["cog"].isin(spec.cog_letters)
+        if spec.function_scope == "region":
+            m &= cc["in_region"]
+        sets.append(_contigs_with(cc, m))
+    if spec.eggnog_text.strip():
+        sets.append(store.eggnog_search(spec.eggnog_text.strip(), spec.function_scope == "region"))
+
     for s in sets:
         keep &= c["contig"].isin(s)
     return c[keep]
@@ -134,8 +146,12 @@ def _options(store: Store, rank: str) -> dict:
         "region_taxa": sorted(R.loc[R["hgt1_rank"].notna(), f"r_{rank}"].dropna().unique()),
         "partner_taxa": sorted(E[f"p_{rank}"].dropna().unique()),
         "groups": sorted(int(g) for g in R["group_id"].dropna().unique()),
-        "card_genes": [], "drug_classes": [], "rip_families": [],
+        "card_genes": [], "drug_classes": [], "rip_families": [], "cog_letters": [],
     }
+    if store.cog_counts is not None:
+        from .cog import COG
+        present = set(store.cog_counts["cog"].unique())
+        out["cog_letters"] = [x for x in COG if x in present]
     if a is not None:
         card = a[a["source"] == "card"]
         out["card_genes"] = sorted(card["label"].dropna().unique())

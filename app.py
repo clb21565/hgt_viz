@@ -4,6 +4,7 @@ import os
 import streamlit as st
 
 from hgtviz import RANK_NAMES, RANKS
+from hgtviz import cog as COG
 from hgtviz import filters as F
 from hgtviz import store as S
 from hgtviz.build import build
@@ -87,7 +88,8 @@ def filter_panel(store: S.Store) -> F.FilterSpec:
         spec.min_group_size = st.number_input("Min. group size (regions)", 0, step=1, key="f_min_group")
         spec.min_length = st.number_input("Min. contig length (bp)", 0, step=1000, key="f_min_length")
 
-    with sb.expander("Function", expanded=bool(opts["card_genes"] or opts["rip_families"])):
+    with sb.expander("Function", expanded=bool(opts["card_genes"] or opts["rip_families"]
+                                               or opts["cog_letters"])):
         if store.annotations is None:
             st.caption("No CARD / RIP-DB annotations in this store.")
         scope = st.radio("Where", ["anywhere on the contig", "inside a kairos region"],
@@ -97,6 +99,15 @@ def filter_panel(store: S.Store) -> F.FilterSpec:
         spec.drug_classes = st.multiselect("CARD drug class", opts["drug_classes"], key="f_drug",
                                            help="Needs --card-index at build time")
         spec.rip_families = st.multiselect("RIP-DB family", opts["rip_families"], key="f_rip")
+        if store.has("eggnog"):
+            spec.cog_letters = st.multiselect("COG category (eggNOG)", opts["cog_letters"],
+                                              format_func=COG.label, key="f_cog")
+            spec.eggnog_text = st.text_input(
+                "eggNOG annotation contains", key="f_egg", placeholder="e.g. transposase, K07483, Rep_3",
+                help="Case-insensitive match on the eggNOG preferred name, description, KEGG KO, "
+                     "Pfam, CAZy and EC of any gene. Press Enter to apply.")
+        else:
+            st.caption("No eggNOG annotations in this store.")
     return spec
 
 

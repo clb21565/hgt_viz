@@ -14,10 +14,12 @@ Reads (under results/detect/, prefix = catalogue name):
             NAME.features/events.tsv                 refined shared segments
             NAME.ffn_coords.tsv                      prodigal ORF coordinates
             NAME-card.tsv, NAME-ripdb.tsv            diamond best hits
+            NAME.faa.eggs.emapper.annotations        eggNOG-mapper (2.0 or 2.1) output
   and results/call/insitu_events.tsv (optional).
 
 Writes Parquet tables (contigs, regions, links, groups, dr, genes, annotations,
-insitu) plus meta.json into --out. The base table is `contigs`: every contig with
+insitu, eggnog, cog_counts) plus meta.json into --out. eggnog.parquet is sorted by
+contig and read per contig by the app, never loaded whole. The base table is `contigs`: every contig with
 an HGT1 region or an HGT2 link.
 
 Taxonomy is parsed here from the mmseqs tables rather than taken from the
@@ -35,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from . import RANKS
+from . import cog as COG
 from .taxonomy import coarsest, discordant_rank, read_mmseqs_taxonomy
 
 STORE_VERSION = 1
@@ -303,6 +306,95 @@ def load_annotations(det, keep_contigs, regions, card_index, log):
                 "mechanism", "pident", "bitscore", "evalue", "stitle", "region_idx", "in_region"]]
 
 
+# store column: (emapper 2.1 name, emapper 2.0 name)
+EGGNOG_COLS = {
+    "evalue": ("evalue", "seed_ortholog_evalue"),
+    "preferred_name": ("Preferred_name", "Preferred_name"),
+    "description": ("Description", "eggNOG free text desc."),
+    "cog_category": ("COG_category", "COG Functional cat."),
+    "kegg_ko": ("KEGG_ko", "KEGG_ko"),
+    "pfams": ("PFAMs", None),
+    "cazy": ("CAZy", "CAZy"),
+    "ec": ("EC", "EC"),
+    "max_annot_lvl": ("max_annot_lvl", "best_tax_level"),
+}
+
+
+def find_eggnog(det):
+    for path in [f"{det}.faa.eggs.emapper.annotations", f"{det}.emapper.annotations"]:
+        if os.path.exists(path):
+            return path
+    hits = sorted(glob.glob(f"{det}*.emapper.annotations"))
+    return hits[0] if hits else None
+
+
+def _emapper_header(path):
+    """Number of comment lines before the header, and the header's columns. emapper
+    2.1 writes '##' comments and a '#query' header; 2.0 writes '#' comments and a
+    '#query_name' header."""
+    with open(path) as fh:
+        for i, line in enumerate(fh):
+            if line.startswith("#query"):
+                return i, line[1:].rstrip("\n").split("\t")
+            if not line.startswith("#"):
+                break
+    raise SystemExit(f"{path}: no '#query' header line; is this an emapper .annotations file?")
+
+
+def load_eggnog(path, genes, log, chunksize=2_000_000):
+    """Stream an emapper .annotations file, keeping only ORFs in the gene table and
+    the columns in EGGNOG_COLS ('-' becomes missing)."""
+    skip, header = _emapper_header(path)
+    query = header[0]
+    pick = {}
+    for col, names in EGGNOG_COLS.items():
+        name = next((n for n in names if n and n in header), None)
+        if name:
+            pick[name] = col
+    keep = pd.Index(genes["orf_id"])
+    parts, n_read = [], 0
+    reader = pd.read_csv(path, sep="\t", skiprows=skip + 1, header=None, names=header,
+                         usecols=[query] + list(pick), dtype=str, quoting=3,
+                         na_values=["-"], keep_default_na=False, chunksize=chunksize)
+    for chunk in reader:
+        n_read += len(chunk)
+        chunk = chunk[chunk[query].isin(keep)]   # also drops trailing '#' comment lines
+        parts.append(chunk)
+        log(f"  eggNOG: read {n_read:,} rows, kept {sum(len(x) for x in parts):,}")
+    if not sum(len(x) for x in parts):
+        log(f"WARNING: none of the {n_read:,} eggNOG queries match an ORF ID in ffn_coords.tsv "
+            f"(e.g. {genes['orf_id'].iloc[0]!r}); was emapper run on a different .faa?")
+    eg = pd.concat(parts, ignore_index=True).rename(columns={query: "orf_id", **pick})
+    eg = eg.drop_duplicates("orf_id")
+    for col in EGGNOG_COLS:
+        if col not in eg.columns:
+            eg[col] = np.nan
+    eg["evalue"] = pd.to_numeric(eg["evalue"], errors="coerce")
+    g = genes.set_index("orf_id")
+    eg["contig"] = eg["orf_id"].map(g["contig"])
+    eg["region_idx"] = eg["orf_id"].map(g["region_idx"])
+    eg["in_region"] = eg["region_idx"].notna()
+    eg["cog_group"] = eg["cog_category"].map(COG.group)
+    eg = eg.sort_values(["contig", "orf_id"], kind="stable").reset_index(drop=True)
+    log(f"eggNOG: {len(eg):,} of {len(genes):,} genes annotated "
+        f"({eg['cog_category'].notna().sum():,} with a COG category)")
+    return eg[["orf_id", "contig", "region_idx", "in_region", "preferred_name", "description",
+               "cog_category", "cog_group", "kegg_ko", "pfams", "cazy", "ec", "evalue",
+               "max_annot_lvl"]]
+
+
+def cog_counts(genes, eg):
+    """Genes per (contig, COG letter, inside a kairos region). Genes with several
+    letters count once per letter; genes without a COG count under '-'."""
+    g = genes[["orf_id", "contig", "region_idx"]].copy()
+    g["cog"] = g["orf_id"].map(eg.set_index("orf_id")["cog_category"])
+    g["cog"] = g["cog"].map(lambda c: COG.letters(c) or ["-"])
+    g = g.explode("cog")
+    g["in_region"] = g["region_idx"].notna()
+    out = g.groupby(["contig", "cog", "in_region"], observed=True).size().rename("n").reset_index()
+    return out
+
+
 def load_insitu(results, log):
     df = _read_tsv(os.path.join(results, "call", "insitu_events.tsv"))
     if df is None:
@@ -313,7 +405,7 @@ def load_insitu(results, log):
 
 # ── main build ───────────────────────────────────────────────────────────────
 
-def build(results, out, catalogue=None, card_index=None, log=print):
+def build(results, out, catalogue=None, card_index=None, eggnog=None, log=print):
     detect_dir = os.path.join(results, "detect")
     if not os.path.isdir(detect_dir):
         detect_dir = results  # allow pointing straight at results/detect
@@ -449,6 +541,18 @@ def build(results, out, catalogue=None, card_index=None, log=print):
     else:
         contigs["drug_classes"] = ""
 
+    eggnog_path = eggnog or find_eggnog(det)
+    eg = cc = None
+    if eggnog_path and genes is not None:
+        log(f"eggNOG: {eggnog_path}")
+        eg = load_eggnog(eggnog_path, genes, log)
+        cc = cog_counts(genes[genes["contig"].isin(set(contigs["contig"]))], eg)  # base contigs only
+        e = eg[eg["cog_category"].notna()]
+        contigs["cogs"] = contigs["contig"].map(
+            e.groupby("contig")["cog_category"].agg(lambda s: "".join(sorted(set("".join(s)))))).fillna("")
+    elif eggnog_path:
+        log("eggNOG: skipped, needs the gene table (ffn_coords.tsv)")
+
     insitu = load_insitu(results, log)
     if insitu is not None and {"recipient_contig", "donor_contig"} <= set(insitu.columns):
         contigs["insitu_as_recipient"] = contigs["contig"].map(
@@ -460,7 +564,7 @@ def build(results, out, catalogue=None, card_index=None, log=print):
     os.makedirs(out, exist_ok=True)
     tables = {"contigs": contigs, "regions": regions.drop(columns=["orfs_encompassed"], errors="ignore"),
               "links": links, "dr": dr, "groups": report, "genes": genes,
-              "annotations": ann, "insitu": insitu}
+              "annotations": ann, "insitu": insitu, "eggnog": eg, "cog_counts": cc}
     written = {}
     for name, df in tables.items():
         path = os.path.join(out, f"{name}.parquet")
@@ -468,7 +572,10 @@ def build(results, out, catalogue=None, card_index=None, log=print):
             if os.path.exists(path):
                 os.remove(path)
             continue
-        df.to_parquet(path, index=False)
+        if name == "eggnog":   # small row groups: the app reads one contig at a time
+            df.to_parquet(path, index=False, row_group_size=20_000)
+        else:
+            df.to_parquet(path, index=False)
         written[name] = len(df)
     meta = {
         "store_version": STORE_VERSION,
@@ -479,6 +586,7 @@ def build(results, out, catalogue=None, card_index=None, log=print):
         "hgt1_source": hgt1_source,
         "hgt2_source": hgt2_source,
         "card_index": os.path.abspath(card_index) if card_index else None,
+        "eggnog": os.path.abspath(eggnog_path) if eg is not None else None,
     }
     with open(os.path.join(out, "meta.json"), "w") as fh:
         json.dump(meta, fh, indent=2)
@@ -493,8 +601,10 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="output store directory")
     ap.add_argument("--catalogue", help="catalogue name (auto-detected if only one)")
     ap.add_argument("--card-index", help="CARD aro_index.tsv, for drug class / gene family / mechanism")
+    ap.add_argument("--eggnog", help="emapper .annotations file (default: NAME.faa.eggs.emapper.annotations "
+                                     "next to the other detect outputs)")
     a = ap.parse_args(argv)
-    build(a.results, a.out, a.catalogue, a.card_index)
+    build(a.results, a.out, a.catalogue, a.card_index, a.eggnog)
 
 
 if __name__ == "__main__":

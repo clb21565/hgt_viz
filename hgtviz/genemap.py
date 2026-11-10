@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from . import RANK_NAMES
+from . import cog as COG
 
 # Categorical slots (fixed order, validated reference palette)
 CARD = "#2a78d6"        # slot 1 blue
@@ -13,17 +14,44 @@ HGT1 = "#1baf7a"        # slot 3 aqua: region band for HGT1 calls
 GENE = "#a3a29c"        # neutral: unannotated gene
 REGION = "#a3a29c"      # neutral: kairos region without an HGT1 call
 LINK = "rgba(42,120,214,0.22)"
+# COG mode: categorical slots 1, 2, 4, 5 in fixed order (slot 3 aqua stays the HGT1
+# region band); the two uninformative groups are neutral greys.
+COG_COLORS = {COG.MOBILE: "#2a78d6", COG.INFO: "#eb6834", COG.CELL: "#eda100",
+              COG.METAB: "#e87ba4", COG.POOR: "#a3a29c", COG.NONE: "#d6d5d0"}
 SEQ_BLUE = [[0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1, "#0d366b"]]
+
+SEGMENT = "#6b6a65"   # neutral: shared-segment ticks (blue is a gene colour in both modes)
 
 GENE_H = 0.28      # half-height of a gene arrow
 BAND_H = 0.42      # half-height of a region band
 
 
-def gene_category(genes: pd.DataFrame, ann: pd.DataFrame | None) -> pd.DataFrame:
-    """Attach annotation columns and a drawing category to each gene."""
+def gene_category(genes: pd.DataFrame, ann: pd.DataFrame | None,
+                  eggnog: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Attach annotation columns and drawing categories to each gene: `category`
+    (CARD / RIP-DB / gene) and `cog_group`, plus hover text."""
     g = genes.copy()
     g["category"] = "gene"
     g["annotation"] = ""
+    g["cog_group"] = COG.NONE
+    g["eggnog"] = ""
+    if eggnog is not None and len(eggnog):
+        e = eggnog.drop_duplicates("orf_id").set_index("orf_id")
+        hit = g["orf_id"].isin(e.index)
+        o = g.loc[hit, "orf_id"]
+        g.loc[hit, "cog_group"] = o.map(e["cog_group"]).fillna(COG.NONE).to_numpy()
+
+        def txt(r):
+            name = r["preferred_name"] if isinstance(r["preferred_name"], str) else ""
+            desc = r["description"] if isinstance(r["description"], str) else ""
+            bits = [f"eggNOG: {name + ' · ' if name else ''}{desc}".rstrip(" ·")]
+            if isinstance(r["cog_category"], str):
+                bits.append("COG " + ", ".join(COG.label(c) for c in COG.letters(r["cog_category"])))
+            extra = [x for x in (r["kegg_ko"], r["pfams"]) if isinstance(x, str)]
+            if extra:
+                bits.append(" · ".join(extra)[:120])
+            return "<br>".join(bits)
+        g.loc[hit, "eggnog"] = o.map(e.apply(txt, axis=1)).to_numpy()
     if ann is not None and len(ann):
         a = ann[ann["orf_id"].isin(g["orf_id"])]
         for src, cat in [("ripdb", "RIP-DB"), ("card", "CARD")]:  # CARD wins if both
@@ -54,7 +82,8 @@ def _arrows(df, y, xf, head):
     return xs, ys
 
 
-def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=None):
+def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=None,
+              color_by="hits"):
     """Draw one contig: backbone, region bands, genes, gene hover points."""
     lo, hi = sorted((xf(0), xf(length)))
     span = (x_range[1] - x_range[0]) if x_range else (hi - lo)
@@ -76,22 +105,29 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
                                  hovertemplate="%{text}<extra></extra>", text=txt,
                                  showlegend=False))
     if genes is not None and len(genes):
-        for cat, color in [("gene", GENE), ("RIP-DB", RIP), ("CARD", CARD)]:
-            g = genes[genes["category"] == cat]
+        if color_by == "cog":
+            layers = [(genes["cog_group"] == grp, c) for grp, c in COG_COLORS.items()]
+        else:
+            layers = [(genes["category"] == cat, c) for cat, c in
+                      [("gene", GENE), ("RIP-DB", RIP), ("CARD", CARD)]]
+        for sel, color in layers:
+            g = genes[sel]
             if g.empty:
                 continue
             xs, ys = _arrows(g, y, xf, head)
             fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", mode="lines",
                                      fillcolor=color, line=dict(color=color, width=0.5),
-                                     name=cat, legendgroup=cat, hoverinfo="skip",
+                                     hoverinfo="skip",
                                      showlegend=False))
         mid = [(xf(s) + xf(e)) / 2 for s, e in zip(genes["start"], genes["end"])]
         text = [f"<b>{o}</b><br>{s + 1:,}–{e:,} ({'+' if st > 0 else '−'})"
                 + (f"<br>{an}" if an else "")
+                + (f"<br>{eg}" if eg else "")
                 + (f"<br>region {ri}" if isinstance(ri, str) else "")
-                for o, s, e, st, an, ri in zip(genes["orf_id"], genes["start"], genes["end"],
-                                               genes["strand"], genes["annotation"],
-                                               genes.get("region_idx", [None] * len(genes)))]
+                for o, s, e, st, an, eg, ri in zip(
+                    genes["orf_id"], genes["start"], genes["end"], genes["strand"],
+                    genes["annotation"], genes.get("eggnog", [""] * len(genes)),
+                    genes.get("region_idx", [None] * len(genes)))]
         fig.add_trace(go.Scatter(x=mid, y=[y] * len(mid), mode="markers",
                                  marker=dict(size=10, opacity=0),
                                  hovertemplate="%{text}<extra></extra>", text=text,
@@ -113,8 +149,9 @@ def _region_hover(r):
 
 
 def _legend(fig, cats):
-    for name, color in [("CARD hit", CARD), ("RIP-DB hit", RIP), ("other gene", GENE),
-                        ("HGT1 region", HGT1), ("other kairos region", REGION)]:
+    for name, color in ([("CARD hit", CARD), ("RIP-DB hit", RIP), ("other gene", GENE)]
+                        + list(COG_COLORS.items())
+                        + [("HGT1 region", HGT1), ("other kairos region", REGION)]):
         if name in cats:
             fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=name,
                                      marker=dict(size=11, color=color, symbol="square",
@@ -132,10 +169,20 @@ def _layout(fig, height, x_range, xtitle="Position (bp)"):
     )
 
 
-def contig_map(contig, length, genes, regions, links=None, x_range=None):
+def _gene_cats(genes, color_by):
+    if genes is None:
+        return set()
+    if color_by == "cog":
+        return set(genes["cog_group"].unique())
+    return {"other gene"} | {"CARD hit" if c == "CARD" else "RIP-DB hit"
+                             for c in genes["category"].unique() if c != "gene"}
+
+
+def contig_map(contig, length, genes, regions, links=None, x_range=None, color_by="hits"):
     """One contig, with shared segments to partner contigs as ticks underneath."""
     fig = go.Figure()
-    add_track(fig, genes, regions, 1.0, f"{contig} · {length:,} bp", length, x_range=x_range)
+    add_track(fig, genes, regions, 1.0, f"{contig} · {length:,} bp", length, x_range=x_range,
+              color_by=color_by)
     if links is not None and len(links):
         # one tick per distinct shared segment, stacked to avoid overlap
         segs = (links.groupby(["start", "end"])
@@ -146,7 +193,7 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None):
             yy = 0.35 - 0.12 * (i % 3)
             xs += [s["start"], s["end"], None]
             ys += [yy, yy, None]
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=CARD, width=4),
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=SEGMENT, width=4),
                                  hoverinfo="skip", showlegend=False))
         fig.add_trace(go.Scatter(
             x=(segs["start"] + segs["end"]) / 2,
@@ -156,10 +203,7 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None):
             hovertemplate="%{text}<extra></extra>", showlegend=False))
         fig.add_annotation(x=0, y=0.5, text="shared segments", showarrow=False, xanchor="left",
                            font=dict(size=11, color="#52514e"))
-    cats = {"other gene"}
-    if genes is not None:
-        cats |= {"CARD hit" if c == "CARD" else "RIP-DB hit" for c in genes["category"].unique()
-                 if c != "gene"}
+    cats = _gene_cats(genes, color_by) or {"other gene"}
     if len(regions):
         cats |= {"HGT1 region" if pd.notna(x) else "other kairos region" for x in regions["hgt1_rank"]}
     _legend(fig, cats)
@@ -168,7 +212,8 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None):
     return fig
 
 
-def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad=5000):
+def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad=5000,
+               color_by="hits"):
     """Two contigs aligned on their shared segment. The partner is shifted (and
     flipped when the copies are in opposite orientation) so the segment lines up."""
     s1, e1 = int(link["start"]), int(link["end"])
@@ -189,15 +234,13 @@ def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad
                                                       y2 + BAND_H, 1.0 - BAND_H],
                              fill="toself", fillcolor=LINK, line=dict(width=0), mode="lines",
                              hoverinfo="skip", showlegend=False))
-    add_track(fig, genes1, regions1, 1.0, f"{c1} · {len1:,} bp", len1, x_range=x_range)
+    add_track(fig, genes1, regions1, 1.0, f"{c1} · {len1:,} bp", len1, x_range=x_range,
+              color_by=color_by)
     strand_note = " (reverse complement)" if int(link.get("strand", 1) or 1) < 0 else ""
     add_track(fig, genes2, regions2, y2, f"{c2} · {len2:,} bp{strand_note}", len2, xf=xf2,
-              x_range=x_range)
-    cats = {"other gene", "HGT1 region", "other kairos region"}
-    for g in (genes1, genes2):
-        if g is not None:
-            cats |= {"CARD hit" if c == "CARD" else "RIP-DB hit" for c in g["category"].unique()
-                     if c != "gene"}
+              x_range=x_range, color_by=color_by)
+    cats = {"HGT1 region", "other kairos region"} | _gene_cats(genes1, color_by) \
+        | _gene_cats(genes2, color_by)
     _legend(fig, cats)
     _layout(fig, 340, x_range, xtitle=f"Position on {c1} (bp)")
     fig.update_yaxes(range=[y2 - 0.55, 1.65])
