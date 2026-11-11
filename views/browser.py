@@ -3,6 +3,7 @@ import streamlit as st
 
 from hgtviz import HGT1_LABEL, HGT1_NAME, HGT2_LABEL, HGT2_NAME, RANK_NAMES, RANKS
 from hgtviz import genemap as G
+from hgtviz import lineages as LIN
 
 store = st.session_state["store"]
 filtered: pd.DataFrame = st.session_state["filtered"]
@@ -143,6 +144,20 @@ def _detail(sel):
 
     # gene map with optional zoom to a region
     zoom_opts = ["Whole contig"] + c_regions["region_idx"].tolist()
+    pending = st.session_state.pop("zoom_pending", None)   # set by the Function search page
+    if pending in zoom_opts:
+        st.session_state[f"zoom_{sel}"] = pending
+    hl = st.session_state.get("sel_gene")
+    if c_genes is None or hl not in set(c_genes["orf_id"]):
+        hl = None
+    if hl:
+        g = c_genes[c_genes["orf_id"] == hl].iloc[0]
+        nm = f" ({g['gene_name']})" if g.get("gene_name") else ""
+        hc = st.columns([5, 1])
+        hc[0].markdown(f":red[**▬**] Selected gene **{hl}**{nm}, {int(g['start']) + 1:,}–{int(g['end']):,} bp"
+                       + (f", in {g['region_idx']}" if isinstance(g.get("region_idx"), str) else ""))
+        hc[1].button("Clear", key="clear_sel_gene", width="stretch",
+                     on_click=lambda: st.session_state.pop("sel_gene", None))
     zc = st.columns([2, 3])
     zoom = zc[0].selectbox("Zoom to", zoom_opts, key=f"zoom_{sel}")
     color_opts = {"HGT evidence": "hgt", "CARD / RIP-DB hits": "hits"}
@@ -169,10 +184,27 @@ def _detail(sel):
         x_range = [max(0, r["start"] - pad), min(length, r["end"] + pad)]
     st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions_h,
                                  None if ev_sel == "hgt1" else c_links, x_range=x_range,
-                                 color_by=color_by, names=names_on),
-                    width="stretch", key=f"map_{sel}_{zoom}_{color_by}_{ev_sel}_{names_on}")
+                                 color_by=color_by, names=names_on, highlight=hl),
+                    width="stretch", key=f"map_{sel}_{zoom}_{color_by}_{ev_sel}_{names_on}_{hl}")
     if c_genes is None:
         st.caption("No gene coordinates in this store (ffn_coords.tsv was not found at build time).")
+
+    # ── lineages involved ────────────────────────────────────────────────────
+    lc = st.columns([3, 1])
+    full = lc[1].toggle("Full partner lineages", value=False, key="lin_full",
+                        help="Off: partners are grouped by the taxon at which they differ from this "
+                             "contig (lower ranks hidden). On: one row per distinct full lineage.")
+    lin, hidden = LIN.hgt_lineages(c, c_regions, c_links_all, use=use, full=full)
+    if len(lin) > 1:
+        lc[0].markdown("**Lineages in this contig's HGT calls**")
+        st.caption("Host first, then each foreign region's own classification and each distinct "
+                   "partner lineage. Grey = same as the host; dark orange = the rank where it first "
+                   "differs; light orange = also differs below that."
+                   + (f" {hidden:,} rarer partner lineages not shown (Partners tab has all)." if hidden else ""))
+        st.dataframe(LIN.style(lin), hide_index=True, width="stretch",
+                     height=min(36 * (len(lin) + 1) + 3, 420),
+                     column_config={"contigs": st.column_config.TextColumn(
+                         help="Partner contigs with this lineage", alignment="right")})
 
     # ── tabs ─────────────────────────────────────────────────────────────────────
     tabs = st.tabs(["Regions", f"Partners ({c_links['partner'].nunique()})",
@@ -220,9 +252,9 @@ def _detail(sel):
                 pad = st.slider("Flank (bp)", 0, 50000, 5000, 1000, key=f"pad_{sel}")
                 st.plotly_chart(G.paired_map(sel, length, c_genes, c_regions_h, p, p_len, p_genes,
                                              p_regions, link, pad=pad, color_by=color_by,
-                                             names=names_on),
+                                             names=names_on, highlight=hl),
                                 width="stretch",
-                                key=f"pairfig_{sel}_{choice}_{color_by}_{ev_sel}_{names_on}")
+                                key=f"pairfig_{sel}_{choice}_{color_by}_{ev_sel}_{names_on}_{hl}")
 
     with tabs[2]:
         if c_dr.empty:

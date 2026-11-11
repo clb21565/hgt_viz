@@ -25,6 +25,7 @@ SEQ_BLUE = [[0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab
 CLUSTER_COLORS = ["#2a78d6", "#eda100", "#008300", "#e34948"]
 SHARED_ORF = "#6b6a65"    # identical copy on another contig, beyond the 4 coloured clusters
 UNIQUE_ORF = "#d6d5d0"    # no identical copy anywhere in the catalogue
+SELECTED = "#e34948"  # the gene picked on the Function search page
 SEGMENT = "#6b6a65"   # neutral: shared-segment ticks (blue is a gene colour in both modes)
 
 # HGT-evidence mode: one blue ramp, darker = deeper taxonomic disagreement. Seven
@@ -283,8 +284,9 @@ def place_names(genes, xf, x_range, px=PLOT_PX, rows=2):
 
 
 def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=None,
-              color_by="hits", names=True):
-    """Draw one contig: backbone, region bands, genes, gene names, gene hover points."""
+              color_by="hits", names=True, highlight=None):
+    """Draw one contig: backbone, region bands, genes, gene names, gene hover points.
+    `highlight` (an orf_id) gets a red outline and a red bar above it."""
     lo, hi = sorted((xf(0), xf(length)))
     span = (x_range[1] - x_range[0]) if x_range else (hi - lo)
     head = span * 0.006
@@ -338,6 +340,15 @@ def add_track(fig, genes, regions, y, label, length, xf=lambda x: x, x_range=Non
                     x=[(xf(s) + xf(e)) / 2 for s, e in zip(lab["start"], lab["end"])],
                     y=[y + GENE_H + 0.1] * len(lab), mode="text", text=lab["clcat"].str[2:],
                     textfont=dict(size=11, color="#52514e"), hoverinfo="skip", showlegend=False))
+        if highlight is not None and (genes["orf_id"] == highlight).any():
+            hg = genes[genes["orf_id"] == highlight]
+            xs, ys = _arrows(hg, y, xf, head)
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=SELECTED, width=2.5),
+                                     hoverinfo="skip", showlegend=False))
+            a, b = sorted((xf(hg["start"].iloc[0]), xf(hg["end"].iloc[0])))
+            fig.add_trace(go.Scatter(x=[a, b], y=[y + GENE_H + 0.07] * 2, mode="lines",
+                                     line=dict(color=SELECTED, width=6), hoverinfo="skip",
+                                     showlegend=False))
         if names:
             placed = place_names(genes, xf, x_range or (lo, hi))
             if placed:
@@ -392,6 +403,7 @@ def _legend(fig, cats, clusters=None):
                         + [("kairos region, no HGT call", NO_HGT_REGION), ("no HGT evidence", NO_HGT)]
                         + [("identical copy on another contig", SHARED_ORF),
                            ("unique ORF (no identical copy)", UNIQUE_ORF)]
+                        + [("selected gene", SELECTED)]
                         + [(HGT1_LABEL, HGT1), ("other kairos region", REGION),
                            ("kairos region", REGION)]):
         if name in cats:
@@ -429,14 +441,14 @@ def _gene_cats(genes, color_by):
 
 
 def contig_map(contig, length, genes, regions, links=None, x_range=None, color_by="hits",
-               names=True):
+               names=True, highlight=None):
     """One contig, with shared segments to partner contigs as ticks underneath."""
     fig = go.Figure()
     if genes is not None:
         genes = genes.copy()
     clusters = assign_clusters([genes]) if color_by == "cluster" else {}
     add_track(fig, genes, regions, 1.0, f"{contig} · {length:,} bp", length, x_range=x_range,
-              color_by=color_by, names=names)
+              color_by=color_by, names=names, highlight=highlight)
     if links is not None and len(links):
         # one tick per distinct shared segment, stacked to avoid overlap
         lk = links.assign(_r=links["discordant_rank"].where(links["is_hgt2"]))
@@ -466,6 +478,8 @@ def contig_map(contig, length, genes, regions, links=None, x_range=None, color_b
         fig.add_annotation(x=0, y=0.43, text="shared segments", showarrow=False, xanchor="left",
                            font=dict(size=11, color="#52514e"))
     cats = _gene_cats(genes, color_by) or {"other gene"}
+    if highlight is not None and genes is not None and (genes["orf_id"] == highlight).any():
+        cats.add("selected gene")
     if len(regions):
         cats |= ({"kairos region"} if color_by == "hgt" else
                  {HGT1_LABEL if pd.notna(x) else "other kairos region" for x in regions["hgt1_rank"]})
@@ -495,7 +509,7 @@ def _ribbons(fig, g1, g2, xf2, y2, clusters, max_pairs=400):
 
 
 def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad=5000,
-               color_by="hits", names=True):
+               color_by="hits", names=True, highlight=None):
     """Two contigs aligned on their shared segment. The partner is shifted (and
     flipped when the copies are in opposite orientation) so the segment lines up."""
     s1, e1 = int(link["start"]), int(link["end"])
@@ -523,13 +537,15 @@ def paired_map(c1, len1, genes1, regions1, c2, len2, genes2, regions2, link, pad
         clusters = assign_clusters([genes1, genes2], paired=True)
         _ribbons(fig, genes1, genes2, xf2, y2, clusters)
     add_track(fig, genes1, regions1, 1.0, f"{c1} · {len1:,} bp", len1, x_range=x_range,
-              color_by=color_by, names=names)
+              color_by=color_by, names=names, highlight=highlight)
     strand_note = " (reverse complement)" if int(link.get("strand", 1) or 1) < 0 else ""
     add_track(fig, genes2, regions2, y2, f"{c2} · {len2:,} bp{strand_note}", len2, xf=xf2,
               x_range=x_range, color_by=color_by, names=names)
     cats = ({"kairos region"} if color_by == "hgt" else {HGT1_LABEL, "other kairos region"}) \
         | _gene_cats(genes1, color_by) \
         | _gene_cats(genes2, color_by)
+    if highlight is not None and genes1 is not None and (genes1["orf_id"] == highlight).any():
+        cats.add("selected gene")
     _legend(fig, cats, clusters)
     _layout(fig, 340, x_range, xtitle=f"Position on {c1} (bp)")
     fig.update_yaxes(range=[y2 - 0.55, 1.65])

@@ -8,3 +8,4 @@ dependencies:
   - pandas>=2.0
   - numpy>=1.26
   - pyarrow>=14
+  - jinja2>=3

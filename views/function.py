@@ -139,4 +139,7 @@ if rows:
     g = tbl.iloc[rows[0]]
     if st.button(f"Open {g['contig']} in the contig browser", type="primary"):
         st.session_state["sel_contig"] = g["contig"]
+        st.session_state["sel_gene"] = g["gene"]   # drawn in red on the gene map
+        if isinstance(g["kairos region"], str):
+            st.session_state["zoom_pending"] = g["kairos region"]
         st.switch_page("views/browser.py")

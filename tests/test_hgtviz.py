@@ -276,3 +276,21 @@ def test_function_scope_hgt(demo):
     if len(card):
         hits, _ = F.function_hits(s, F.FilterSpec(function_scope="hgt", card_genes=[card.iloc[0]]))
         assert hits["region_idx"].isin(hgt_regs).all() and len(hits)
+
+
+def test_hgt_lineages(demo):
+    from hgtviz import lineages as LIN
+    s = demo
+    c = s.contigs.sort_values(["n_hgt2_partners"]).iloc[-1]
+    R, L = s.rows_for("regions", c["contig"]), s.rows_for("link_ends", c["contig"])
+    full, _ = LIN.hgt_lineages(c, R, L, full=True)
+    cut, _ = LIN.hgt_lineages(c, R, L)
+    assert full.iloc[0]["evidence"].startswith("this contig")
+    h2 = L[L["is_hgt2"]]
+    n1 = int(R["hgt1_rank"].notna().sum())
+    for t in (full, cut):   # every HGT2 partner counted once per lineage row group
+        assert len(t) >= 1 + n1 and pd.to_numeric(t["contigs"]).sum() >= h2["partner"].nunique()
+    assert len(cut) <= len(full)
+    only1, _ = LIN.hgt_lineages(c, R, L, use=("hgt1",))
+    assert len(only1) == 1 + n1
+    LIN.style(cut).to_html()   # styler renders
