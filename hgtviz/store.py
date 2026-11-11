@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
@@ -150,6 +151,47 @@ class Store:
             return set()
         return self.memo(("eggnog_search", text.lower(), region_only), run, maxsize=32,
                          bucket="eggnog_search")
+
+    def eggnog_rows(self, text: str = "", cog_letters=(), region_only=False,
+                    contigs: set | None = None, limit: int = 5000) -> tuple[pd.DataFrame, int]:
+        """Genes whose eggNOG annotation contains `text` and/or has any of the COG
+        letters, optionally only on `contigs` and inside kairos regions. Returns at
+        most `limit` rows and the total number of matching genes."""
+        def run():
+            cols = ["orf_id", "contig", "region_idx", "in_region", "cog_category"] + EGGNOG_SEARCH_COLS
+            pf = pq.ParquetFile(self.eggnog_path)
+            vs = pa.array(sorted(contigs), pa.string()) if contigs is not None else None
+            parts, total = [], 0
+            for i in range(pf.num_row_groups):
+                t = pf.read_row_group(i, columns=list(dict.fromkeys(cols)))
+                m = pa.array([True] * t.num_rows)
+                if text:
+                    tm = None
+                    for c in EGGNOG_SEARCH_COLS:
+                        x = pc.fill_null(pc.match_substring(t[c], text, ignore_case=True), False)
+                        tm = x if tm is None else pc.or_(tm, x)
+                    m = pc.and_(m, tm)
+                if cog_letters:
+                    cm = None
+                    for L in cog_letters:
+                        x = pc.fill_null(pc.match_substring(t["cog_category"], L), False)
+                        cm = x if cm is None else pc.or_(cm, x)
+                    m = pc.and_(m, cm)
+                if region_only:
+                    m = pc.and_(m, pc.fill_null(t["in_region"], False))
+                if vs is not None:
+                    m = pc.and_(m, pc.is_in(t["contig"], value_set=vs))
+                n = pc.sum(m).as_py() or 0
+                total += n
+                if n and sum(len(x) for x in parts) < limit:
+                    parts.append(pc.filter(t, m).to_pandas())
+            out = pd.concat(parts, ignore_index=True).head(limit) if parts else pd.DataFrame(columns=cols)
+            return out, total
+        if self.eggnog_path is None or not (text or cog_letters):
+            return pd.DataFrame(), 0
+        key = ("eggnog_rows", text.lower(), tuple(cog_letters), region_only,
+               None if contigs is None else hash(frozenset(contigs)), limit)
+        return self.memo(key, run, maxsize=8, bucket="eggnog_rows")
 
     def has(self, name) -> bool:
         if name == "eggnog":

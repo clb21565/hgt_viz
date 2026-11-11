@@ -3,7 +3,7 @@ import os
 
 import streamlit as st
 
-from hgtviz import RANK_NAMES, RANKS
+from hgtviz import HGT1_LABEL, HGT1_NAME, HGT2_LABEL, HGT2_NAME, RANK_NAMES, RANKS
 from hgtviz import cog as COG
 from hgtviz import filters as F
 from hgtviz import store as S
@@ -55,6 +55,19 @@ def _reset_taxa():
         st.session_state[k] = []
 
 
+def function_summary(spec: F.FilterSpec) -> str:
+    bits = []
+    for name, v in [("CARD gene", spec.card_genes), ("drug class", spec.drug_classes),
+                    ("RIP-DB", spec.rip_families),
+                    ("COG", [COG.label(x) for x in spec.cog_letters])]:
+        if v:
+            bits.append(f"{name}: {', '.join(v)}")
+    if spec.eggnog_text.strip():
+        bits.append(f"eggNOG contains '{spec.eggnog_text.strip()}'")
+    where = "inside kairos regions" if spec.function_scope == "region" else "anywhere on the contig"
+    return "Contigs with " + "; ".join(bits) + f" ({where})"
+
+
 def filter_panel(store: S.Store) -> F.FilterSpec:
     sb = st.sidebar
     sb.header("Filter contigs")
@@ -66,48 +79,58 @@ def filter_panel(store: S.Store) -> F.FilterSpec:
     spec = F.FilterSpec()
     spec.search = sb.text_input("Contig ID contains", key="f_search")
     evidence = ["HGT1", "HGT2", "Donor–recipient"] + (["In situ"] if store.has("insitu") else [])
-    spec.require = sb.multiselect("Require evidence (all of)", evidence, key="f_require")
+    ev_names = {"HGT1": HGT1_LABEL, "HGT2": HGT2_LABEL}
+    spec.require = sb.multiselect("Require evidence (all of)", evidence, key="f_require",
+                                  format_func=lambda x: ev_names.get(x, x),
+                                  help="See the 'HGT calls explained' page for what each type means.")
 
     with sb.expander("Taxonomy", expanded=True):
         spec.tax_rank = st.selectbox("Rank", RANKS, index=1, format_func=RANK_NAMES.get,
                                      key="f_tax_rank", on_change=_reset_taxa)
         opts = F.options(store, spec.tax_rank)
         spec.contig_taxa = st.multiselect("Host contig taxon", opts["contig_taxa"], key="f_contig_taxa")
-        spec.region_taxa = st.multiselect("HGT1 region taxon (putative donor lineage)",
+        spec.region_taxa = st.multiselect(f"{HGT1_NAME} taxon (putative donor lineage)",
                                           opts["region_taxa"], key="f_region_taxa")
-        spec.partner_taxa = st.multiselect("HGT2 partner contig taxon", opts["partner_taxa"],
+        spec.partner_taxa = st.multiselect(f"{HGT2_NAME} partner contig taxon", opts["partner_taxa"],
                                            key="f_partner_taxa")
+        st.markdown("**Search full lineages**")
+        spec.host_lineage = st.text_input(
+            "Host contig lineage contains", key="f_host_lineage", placeholder="e.g. Burkholderiaceae",
+            help="Case-insensitive text anywhere in the contig's lineage (domain to species). "
+                 "Separate alternatives with commas. End a name with ';' for an exact match "
+                 "('Bacillota;' excludes 'Bacillota_A'). Press Enter to apply.")
+        spec.other_lineage = st.text_input(
+            "Foreign / partner lineage contains", key="f_other_lineage", placeholder="e.g. Comamonas",
+            help=f"Text in the lineage of one of the contig's {HGT1_NAME.lower()} regions (HGT1) or "
+                 f"{HGT2_NAME.lower()} partners (HGT2). Combine with the host search to find, say, "
+                 "Comamonas-like DNA on Burkholderia contigs. Commas separate alternatives.")
+        where = {"either": "either", "hgt1": HGT1_LABEL, "hgt2": f"{HGT2_NAME} partner (HGT2)"}
+        spec.other_lineage_in = st.radio("Look in", list(where), format_func=where.get,
+                                         key="f_other_lineage_in", horizontal=False)
 
     with sb.expander("HGT calls"):
-        spec.hgt1_ranks = st.multiselect("HGT1 detected at", RANKS, format_func=RANK_NAMES.get,
+        spec.hgt1_ranks = st.multiselect(f"{HGT1_NAME} (HGT1) detected at", RANKS, format_func=RANK_NAMES.get,
                                          key="f_hgt1_ranks")
-        spec.hgt2_ranks = st.multiselect("HGT2 lineages differ at", RANKS, format_func=RANK_NAMES.get,
+        spec.hgt2_ranks = st.multiselect(f"{HGT2_NAME} (HGT2): lineages differ at", RANKS, format_func=RANK_NAMES.get,
                                          key="f_hgt2_ranks")
         spec.min_partners = st.number_input("Min. HGT2 partner contigs", 0, step=1, key="f_min_partners")
         spec.groups = st.multiselect("HGT group", opts["groups"], key="f_groups")
         spec.min_group_size = st.number_input("Min. group size (regions)", 0, step=1, key="f_min_group")
         spec.min_length = st.number_input("Min. contig length (bp)", 0, step=1000, key="f_min_length")
 
-    with sb.expander("Function", expanded=bool(opts["card_genes"] or opts["rip_families"]
-                                               or opts["cog_letters"])):
-        if store.annotations is None:
-            st.caption("No CARD / RIP-DB annotations in this store.")
-        scope = st.radio("Where", ["anywhere on the contig", "inside a kairos region"],
-                         key="f_scope", horizontal=False)
-        spec.function_scope = "region" if scope.startswith("inside") else "contig"
-        spec.card_genes = st.multiselect("CARD gene", opts["card_genes"], key="f_card")
-        spec.drug_classes = st.multiselect("CARD drug class", opts["drug_classes"], key="f_drug",
-                                           help="Needs --card-index at build time")
-        spec.rip_families = st.multiselect("RIP-DB family", opts["rip_families"], key="f_rip")
-        if store.has("eggnog"):
-            spec.cog_letters = st.multiselect("COG category (eggNOG)", opts["cog_letters"],
-                                              format_func=COG.label, key="f_cog")
-            spec.eggnog_text = st.text_input(
-                "eggNOG annotation contains", key="f_egg", placeholder="e.g. transposase, K07483, Rep_3",
-                help="Case-insensitive match on the eggNOG preferred name, description, KEGG KO, "
-                     "Pfam, CAZy and EC of any gene. Press Enter to apply.")
+    func = st.session_state.get("f_func") or {}
+    for k in F.FUNCTION_FIELDS:
+        if k in func:
+            setattr(spec, k, func[k])
+    with sb.expander("Function", expanded=F.function_active(spec)):
+        if F.function_active(spec):
+            st.markdown(function_summary(spec))
+            if st.button("Clear function filter", width="stretch"):
+                del st.session_state["f_func"]
+                st.rerun()
         else:
-            st.caption("No eggNOG annotations in this store.")
+            st.caption("No function filter.")
+        st.page_link("views/function.py", label="Search genes by function", icon=":material/search:")
     return spec
 
 
@@ -115,7 +138,9 @@ store = dataset_panel()
 pages = [
     st.Page("views/browser.py", title="Contig browser", icon=":material/table_rows:", default=True),
     st.Page("views/summary.py", title="Summary", icon=":material/bar_chart:"),
+    st.Page("views/function.py", title="Function search", icon=":material/search:"),
     st.Page("views/groups.py", title="HGT groups", icon=":material/hub:"),
+    st.Page("views/about.py", title="HGT calls explained", icon=":material/help:"),
 ]
 pg = st.navigation(pages)
 

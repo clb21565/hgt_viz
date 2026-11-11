@@ -13,15 +13,22 @@ in situ calls.
 
 | Page | What it shows |
 |------|---------------|
-| **Contig browser** | Filterable contig table, TSV exports of the filtered set, and for the selected contig: a gene map (regions, shared segments; genes coloured by CARD / RIP-DB hit or by eggNOG COG group, eggNOG name and description on hover), tabs for regions, partners (select a row for an aligned two-contig view), donor–recipient pairs, groups, annotations (CARD / RIP-DB and eggNOG) and in situ calls |
+| **Contig browser** | Filterable contig table (quick switch: any / HGT1 / HGT2 / both / one type only), TSV exports of the filtered set, and for the selected contig: a gene map (regions, shared segments; genes coloured by HGT evidence, CARD / RIP-DB hit, eggNOG COG group or identical ORFs; CARD or eggNOG gene names under the genes where they fit; wrapped eggNOG text on hover; an **Evidence** switch to show HGT1 or HGT2 only), tabs for regions, partners (select a row for an aligned two-contig view), donor–recipient pairs, groups, annotations (CARD / RIP-DB and eggNOG) and in situ calls |
 | **Summary** | For the filtered contigs: rank of the HGT calls, HGT1 region → host taxon matrix, HGT2 contig ↔ partner matrix, COG categories inside vs. outside kairos regions, CARD genes / drug classes / RIP-DB families inside vs. outside kairos regions |
+| **Function search** | Search genes by CARD gene, drug class, RIP-DB family, COG category or eggNOG text (anywhere, or only inside kairos regions). Shows matching genes in the whole store and on the filtered contigs; **Apply as filter** keeps only contigs with a match on every page; select a gene to open its contig |
 | **HGT groups** | Groups that touch the filtered contigs, their CARD / RIP-DB content, member regions, and a button to filter the browser to one group |
+| **HGT calls explained** | What HGT1 (*foreign region*) and HGT2 (*cross-lineage share*) mean, how they combine with donor–recipient, groups and in situ calls, and how to read the gene-map colours |
+
+Display names: HGT1 is shown as **Foreign region** (the region's taxonomy differs from its
+host contig) and HGT2 as **Cross-lineage share** (the same region on contigs of different
+lineages). Change them in `hgtviz/__init__.py`; pipeline files keep HGT1 / HGT2.
 
 Sidebar filters apply to every page: contig ID, required evidence (HGT1, HGT2,
-donor–recipient, in situ), host / HGT1-region / HGT2-partner taxon at any rank, rank
-of the HGT1 and HGT2 calls, HGT group and group size, contig length, CARD gene, CARD
-drug class, RIP-DB family, COG category and eggNOG text (name, description, KO, Pfam,
-CAZy, EC) — anywhere on the contig, or only inside a kairos region.
+donor–recipient, in situ), host / HGT1-region / HGT2-partner taxon at any rank, free-text
+search in the full lineage of the host and of its foreign regions / partners (commas =
+alternatives, a trailing `;` = exact name, e.g. host `Burkholderiaceae`, partner
+`Comamonas`), rank of the HGT1 and HGT2 calls, HGT group and group size, contig length,
+and the function filter set on the Function search page.
 
 ## 1. Build a store
 

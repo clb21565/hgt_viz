@@ -203,3 +203,50 @@ def test_hgt_evidence(demo):
 def test_missing_store(tmp_path):
     with pytest.raises(S.StoreError):
         S.load(str(tmp_path))
+
+
+def test_lineage_search(demo):
+    s = demo
+    c = s.contigs
+    host = c["p"].dropna().iloc[0]
+    exact = F.apply(s, F.FilterSpec(host_lineage=f"{host};"))
+    assert set(exact["contig"]) == set(c.loc[c["p"] == host, "contig"])
+    loose = F.apply(s, F.FilterSpec(host_lineage=host.lower()))
+    assert set(exact["contig"]) <= set(loose["contig"])
+    # partner / region lineage: contigs with an HGT1 region or an HGT2 partner of that phylum
+    R, E = s.regions, s.link_ends
+    tax = R.loc[R["hgt1_rank"].notna(), "r_p"].dropna().iloc[0]
+    want1 = set(R.loc[R["hgt1_rank"].notna() & (R["r_p"] == tax), "contig"]) & set(c["contig"])
+    want2 = set(E.loc[E["is_hgt2"] & (E["p_p"] == tax), "contig"]) & set(c["contig"])
+    got1 = F.apply(s, F.FilterSpec(other_lineage=f"{tax};", other_lineage_in="hgt1"))
+    got2 = F.apply(s, F.FilterSpec(other_lineage=f"{tax};", other_lineage_in="hgt2"))
+    both = F.apply(s, F.FilterSpec(other_lineage=f"{tax}; , nothing-like-this"))
+    assert set(got1["contig"]) == want1 and set(got2["contig"]) == want2
+    assert set(both["contig"]) == want1 | want2
+
+
+def test_function_hits(demo):
+    s = demo
+    spec = F.FilterSpec(eggnog_text="transposase")
+    hits, tot = F.function_hits(s, spec)
+    assert tot["eggNOG"] == len(hits) > 0
+    assert hits["detail"].str.contains("transposase", case=False).all() or \
+        hits["name"].str.contains("transposase", case=False).any()
+    # the contig filter and the gene table agree
+    assert set(F.apply(s, spec)["contig"]) <= set(hits["contig"])
+    card = s.annotations.loc[s.annotations["source"] == "card", "label"].iloc[0]
+    spec = F.FilterSpec(card_genes=[card], cog_letters=["X"], function_scope="region")
+    hits, tot = F.function_hits(s, spec)
+    assert set(hits["source"]) == {"CARD gene", "eggNOG"} and hits["in_region"].all()
+
+
+def test_wrap_and_gene_names():
+    from hgtviz import genemap as G
+    w = G.wrap("eggNOG: tnpA · " + "word " * 40 + "x" * 130, 60)
+    assert all(len(line) <= 60 for line in w.split("<br>"))
+    genes = pd.DataFrame({"start": [0, 1000, 1100, 5000], "end": [900, 1090, 1300, 6000],
+                          "gene_name": ["tnpA", "intI1", "sul1", ""]})
+    placed = G.place_names(genes, lambda x: x, (0, 10000), px=1000)
+    assert [p[2] for p in placed] == ["tnpA", "intI1", "sul1"]
+    assert [p[1] for p in placed] == [0, 0, 1]   # sul1 would collide with intI1: second row
+    assert G.place_names(genes, lambda x: x, (0, 200000), px=1000, rows=1)[0][2] == "tnpA"

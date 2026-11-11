@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from hgtviz import RANK_NAMES, RANKS
+from hgtviz import HGT1_LABEL, HGT1_NAME, HGT2_LABEL, HGT2_NAME, RANK_NAMES, RANKS
 from hgtviz import genemap as G
 
 store = st.session_state["store"]
@@ -15,11 +15,23 @@ def rank_name(r):
 
 
 st.title("Contig browser")
-st.caption("Every contig with an HGT1 region or an HGT2 link. Narrow the list with the "
-           "sidebar filters, then select a row to see its regions, partners and genes.")
+st.caption(f"Every contig with a {HGT1_NAME.lower()} (HGT1) or a {HGT2_NAME.lower()} (HGT2). "
+           "Narrow the list with the sidebar filters, then select a row to see its regions, "
+           "partners and genes. The 'HGT calls explained' page describes both types.")
 
 if filtered.empty:
     st.warning("No contigs match the current filters.")
+    st.stop()
+
+QUICK = {"any": "Any HGT", "hgt1": HGT1_LABEL, "hgt2": HGT2_LABEL, "both": "Both",
+         "hgt1_only": f"{HGT1_NAME} only", "hgt2_only": f"{HGT2_NAME} only"}
+quick = st.segmented_control("Show contigs with", list(QUICK), format_func=QUICK.get,
+                             default="any", key="quick_evidence") or "any"
+h1, h2 = filtered["hgt1"], filtered["hgt2"]
+filtered = filtered[{"any": h1 | h2, "hgt1": h1, "hgt2": h2, "both": h1 & h2,
+                     "hgt1_only": h1 & ~h2, "hgt2_only": h2 & ~h1}[quick]]
+if filtered.empty:
+    st.warning("No contigs of this kind pass the current filters.")
     st.stop()
 
 # ── table ────────────────────────────────────────────────────────────────────
@@ -32,6 +44,8 @@ tbl = pd.DataFrame({
     "HGT1 rank": filtered["hgt1_rank"].map(rank_name),
     "HGT2 partners": filtered["n_hgt2_partners"],
     "HGT2 rank": filtered["hgt2_rank"].map(rank_name),
+    "lineage": filtered[RANKS].astype("object").where(filtered[RANKS].notna(), "")
+               .astype(str).agg("; ".join, axis=1).str.replace(r"(; )+$", "", regex=True),
     "groups": filtered["groups"],
     "donor/recipient": filtered["dr_role"],
     "CARD genes": filtered["card_genes"],
@@ -48,8 +62,13 @@ event = st.dataframe(
     key="contig_table",
     column_config={
         "length": st.column_config.NumberColumn(format="localized"),
-        "HGT1 regions": st.column_config.NumberColumn(width="small"),
-        "HGT2 partners": st.column_config.NumberColumn(width="small"),
+        "HGT1 regions": st.column_config.NumberColumn(
+            width="small", help=f"{HGT1_NAME} regions: region taxonomy differs from this contig's"),
+        "HGT1 rank": st.column_config.TextColumn(help=f"{HGT1_NAME}: coarsest rank of disagreement"),
+        "HGT2 partners": st.column_config.NumberColumn(
+            width="small", help=f"{HGT2_NAME}: contigs of another lineage sharing a region with this one"),
+        "HGT2 rank": st.column_config.TextColumn(help=f"{HGT2_NAME}: coarsest rank at which the lineages differ"),
+        "lineage": st.column_config.TextColumn(width="medium"),
     },
 )
 
@@ -100,7 +119,8 @@ def _detail(sel):
 
     c_regions = store.rows_for("regions", sel).sort_values("start")
     c_links = store.rows_for("link_ends", sel)
-    show_all = st.toggle("Include links between same-lineage contigs (not HGT2)", value=False,
+    show_all = st.toggle(f"Include links between same-lineage contigs (not {HGT2_NAME.lower()})",
+                         value=False,
                          help="kairos-lr also finds shared regions between contigs of the same lineage; "
                               "these are not HGT2 calls.")
     if not show_all:
@@ -111,11 +131,11 @@ def _detail(sel):
     c_egg = store.eggnog_for(sel) if store.has("eggnog") else None
     if c_genes is not None:
         c_genes = G.gene_category(c_genes, c_ann, c_egg)
-    c_genes, c_regions_h = G.annotate_hgt(c_genes, c_regions, store.rows_for("link_ends", sel), c)
+    c_links_all = store.rows_for("link_ends", sel)
 
     m = st.columns(6)
     m[0].metric("Kairos regions", len(c_regions))
-    m[1].metric("HGT1 regions", int(c_regions["hgt1_rank"].notna().sum()))
+    m[1].metric(f"{HGT1_NAME} regions", int(c_regions["hgt1_rank"].notna().sum()))
     m[2].metric("Partner contigs", c_links["partner"].nunique())
     m[3].metric("Groups", c_regions["group_id"].nunique())
     m[4].metric("CARD hits", 0 if c_ann is None else int((c_ann["source"] == "card").sum()))
@@ -132,14 +152,25 @@ def _detail(sel):
         color_opts["Identical ORFs (mmseqs clusters)"] = "cluster"
     color_by = color_opts[zc[1].radio("Colour genes by", list(color_opts), horizontal=True,
                                       key="color_by")]
+    oc = st.columns([3, 1])
+    EV = {"both": "Both", "hgt1": HGT1_LABEL, "hgt2": HGT2_LABEL}
+    ev_sel = oc[0].segmented_control(
+        "Evidence shown", list(EV), format_func=EV.get, default="both", key="evidence_shown",
+        help="Limit the HGT colouring, region labels and shared-segment ticks to one call type.") or "both"
+    use = {"both": ("hgt1", "hgt2"), "hgt1": ("hgt1",), "hgt2": ("hgt2",)}[ev_sel]
+    names_on = oc[1].toggle("Gene names", value=True, key="gene_names",
+                            help="CARD gene or eggNOG preferred name under each gene, where it fits. "
+                                 "Zoom in (Zoom to) to fit more.")
+    c_genes, c_regions_h = G.annotate_hgt(c_genes, c_regions, c_links_all, c, use=use)
     x_range = None
     if zoom != "Whole contig":
         r = c_regions.set_index("region_idx").loc[zoom]
         pad = max(2000, int((r["end"] - r["start"]) * 0.3))
         x_range = [max(0, r["start"] - pad), min(length, r["end"] + pad)]
-    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions_h, c_links, x_range=x_range,
-                                 color_by=color_by),
-                    width="stretch", key=f"map_{sel}_{zoom}_{color_by}")
+    st.plotly_chart(G.contig_map(sel, length, c_genes, c_regions_h,
+                                 None if ev_sel == "hgt1" else c_links, x_range=x_range,
+                                 color_by=color_by, names=names_on),
+                    width="stretch", key=f"map_{sel}_{zoom}_{color_by}_{ev_sel}_{names_on}")
     if c_genes is None:
         st.caption("No gene coordinates in this store (ffn_coords.tsv was not found at build time).")
 
@@ -185,11 +216,13 @@ def _detail(sel):
                     p_genes = G.gene_category(p_genes, p_ann, p_egg)
                 p_host = store.rows_for("contigs", p)
                 p_genes, p_regions = G.annotate_hgt(p_genes, p_regions, store.rows_for("link_ends", p),
-                                                    p_host.iloc[0] if len(p_host) else None)
+                                                    p_host.iloc[0] if len(p_host) else None, use=use)
                 pad = st.slider("Flank (bp)", 0, 50000, 5000, 1000, key=f"pad_{sel}")
                 st.plotly_chart(G.paired_map(sel, length, c_genes, c_regions_h, p, p_len, p_genes,
-                                             p_regions, link, pad=pad, color_by=color_by),
-                                width="stretch", key=f"pairfig_{sel}_{choice}_{color_by}")
+                                             p_regions, link, pad=pad, color_by=color_by,
+                                             names=names_on),
+                                width="stretch",
+                                key=f"pairfig_{sel}_{choice}_{color_by}_{ev_sel}_{names_on}")
 
     with tabs[2]:
         if c_dr.empty:

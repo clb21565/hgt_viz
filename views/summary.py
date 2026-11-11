@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from hgtviz import RANK_NAMES, RANKS
+from hgtviz import HGT1_LABEL, HGT1_NAME, HGT2_LABEL, HGT2_NAME, RANK_NAMES, RANKS
 from hgtviz import cog as COG
 from hgtviz.genemap import CARD, RIP, SEQ_BLUE
 
@@ -26,11 +26,11 @@ A = store.subset("annotations", filtered) if store.has("annotations") else None
 
 m = st.columns(5)
 m[0].metric("Contigs", f"{len(filtered):,}")
-m[1].metric("HGT1 regions", f"{len(H1):,}")
+m[1].metric(f"{HGT1_NAME} regions", f"{len(H1):,}")
 lo = np.minimum(E["_cid"].to_numpy(), E["_pid"].to_numpy()).astype(np.int64)
 hi = np.maximum(E["_cid"].to_numpy(), E["_pid"].to_numpy()).astype(np.int64)
 n_pairs = len(np.unique(lo * (len(store.ids()) + 1) + hi))
-m[2].metric("HGT2 contig pairs", f"{n_pairs:,}",
+m[2].metric(f"{HGT2_NAME} pairs", f"{n_pairs:,}",
             help="Distinct contig pairs with at least one contig in the filtered set.")
 m[3].metric("Donor–recipient pairs",
             f"{store.dr[store.dr['recipient'].isin(names) | store.dr['donor'].isin(names)].shape[0]:,}")
@@ -47,8 +47,8 @@ def _layout(fig, h):
 # ── HGT call ranks ───────────────────────────────────────────────────────────
 st.subheader("Rank of the HGT calls")
 rank_counts = pd.DataFrame({
-    "HGT1 (contigs)": filtered["hgt1_rank"].value_counts(),
-    "HGT2 (contigs)": filtered["hgt2_rank"].value_counts(),
+    f"{HGT1_LABEL}, contigs": filtered["hgt1_rank"].value_counts(),
+    f"{HGT2_LABEL}, contigs": filtered["hgt2_rank"].value_counts(),
 }).reindex(RANKS).fillna(0).astype(int)
 fig = go.Figure()
 for col, color in zip(rank_counts.columns, [CARD, RIP]):
@@ -88,15 +88,15 @@ def heatmap(df, x, y, xlab, ylab, symmetric=False):
 
 left, right = st.columns(2)
 with left:
-    st.markdown("**HGT1: region taxon → host contig taxon**")
-    st.caption("One count per HGT1 region. Rows are the region's (putative donor) lineage.")
+    st.markdown(f"**{HGT1_LABEL}: region taxon → host contig taxon**")
+    st.caption(f"One count per {HGT1_NAME.lower()} region. Rows are the region's (putative donor) lineage.")
     h = pd.DataFrame({f"r_{rank}": H1[f"r_{rank}"].to_numpy(),
                       rank: store.contigs[rank].to_numpy()[H1["_cid"].to_numpy()]}).dropna()
     h = h[h[f"r_{rank}"] != h[rank]]
     heatmap(h, rank, f"r_{rank}", "Host contig", "Region")
 with right:
-    st.markdown("**HGT2: contig taxon ↔ partner taxon**")
-    st.caption("One count per distinct contig pair; HGT2 has no direction, so the matrix is symmetric.")
+    st.markdown(f"**{HGT2_LABEL}: contig taxon ↔ partner taxon**")
+    st.caption("One count per distinct contig pair; it has no direction, so the matrix is symmetric.")
     pairs = E[["_cid", "_pid", f"p_{rank}"]].drop_duplicates(["_cid", "_pid"])
     pairs = pd.DataFrame({f"p_{rank}": pairs[f"p_{rank}"].to_numpy(),
                           rank: store.contigs[rank].to_numpy()[pairs["_cid"].to_numpy()]}).dropna()

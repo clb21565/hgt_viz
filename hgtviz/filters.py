@@ -2,9 +2,15 @@
 are ignored. Kept free of Streamlit so it can be unit-tested."""
 from dataclasses import astuple, dataclass, field
 
+import re
+
 import pandas as pd
 
+from . import RANKS
 from .store import Store
+
+FUNCTION_FIELDS = ["card_genes", "drug_classes", "rip_families", "cog_letters", "eggnog_text",
+                   "function_scope"]
 
 
 @dataclass
@@ -17,6 +23,9 @@ class FilterSpec:
     contig_taxa: list = field(default_factory=list)    # host contig taxon at tax_rank
     region_taxa: list = field(default_factory=list)    # HGT1 region taxon at tax_rank
     partner_taxa: list = field(default_factory=list)   # HGT2 partner taxon at tax_rank
+    host_lineage: str = ""           # text in the host contig's full lineage
+    other_lineage: str = ""          # text in an HGT1 region's or HGT2 partner's full lineage
+    other_lineage_in: str = "either"  # "either", "hgt1" or "hgt2"
     groups: list = field(default_factory=list)
     min_group_size: int = 0
     card_genes: list = field(default_factory=list)
@@ -32,7 +41,7 @@ class FilterSpec:
         """Human-readable list of the filters that are set."""
         out = []
         for name in ["search", "require", "hgt1_ranks", "hgt2_ranks", "contig_taxa", "region_taxa",
-                     "partner_taxa", "groups", "card_genes", "drug_classes", "rip_families",
+                     "partner_taxa", "host_lineage", "other_lineage", "groups", "card_genes", "drug_classes", "rip_families",
                      "cog_letters", "eggnog_text"]:
             if getattr(self, name):
                 out.append(name)
@@ -51,6 +60,32 @@ def annotation_hits(store: Store, scope: str) -> pd.DataFrame:
     if a is None:
         return pd.DataFrame(columns=["contig", "source", "label", "category", "in_region"])
     return a[a["in_region"]] if scope == "region" else a
+
+
+def lineage_terms(text: str) -> str | None:
+    """Comma-separated terms (any of them) as one case-insensitive regex."""
+    terms = [t.strip() for t in text.split(",") if t.strip()]
+    return "|".join(re.escape(t) for t in terms) or None
+
+
+def lineage(store: Store, name: str, prefix: str = "") -> pd.Series:
+    """Full lineage of every row of a table ('d; p; c; o; f; g; s', blanks dropped),
+    built once per table and column prefix."""
+    def run():
+        df = store.link_ends if name == "link_ends" else getattr(store, name)
+        cols = [f"{prefix}{r}" for r in RANKS if f"{prefix}{r}" in df.columns]
+        x = df[cols].astype("object").where(df[cols].notna(), "").astype(str)
+        out = x[cols[0]] if cols else pd.Series("", index=df.index)
+        for c in cols[1:]:
+            out = out + "; " + x[c]
+        return out.str.replace(r"(; )+$", "", regex=True) + ";"   # 'Bacillota;' = exact name
+    return store.memo(("lineage", name, prefix), run, maxsize=8, bucket="lineage")
+
+
+def lineage_matches(store: Store, name: str, prefix: str, text: str) -> pd.Series:
+    pat = lineage_terms(text)
+    lin = lineage(store, name, prefix)
+    return lin.str.contains(pat, case=False, regex=True) if pat else pd.Series(True, index=lin.index)
 
 
 def _key(spec: FilterSpec):
@@ -85,6 +120,8 @@ def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
     r = spec.tax_rank
     if spec.contig_taxa:
         keep &= c[r].isin(spec.contig_taxa)
+    if lineage_terms(spec.host_lineage):
+        keep &= lineage_matches(store, "contigs", "", spec.host_lineage)
 
     sets = []
     R = store.regions
@@ -104,6 +141,17 @@ def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
             sets.append(_contigs_with(E, E["discordant_rank"].isin(spec.hgt2_ranks)))
         if spec.partner_taxa:
             sets.append(_contigs_with(E, E[f"p_{r}"].isin(spec.partner_taxa)))
+
+    if lineage_terms(spec.other_lineage):
+        hits = set()
+        if spec.other_lineage_in in ("either", "hgt1"):
+            m = R["hgt1_rank"].notna() & lineage_matches(store, "regions", "r_", spec.other_lineage)
+            hits |= _contigs_with(R, m)
+        if spec.other_lineage_in in ("either", "hgt2"):
+            E = store.link_ends
+            m = E["is_hgt2"] & lineage_matches(store, "link_ends", "p_", spec.other_lineage)
+            hits |= _contigs_with(E, m)
+        sets.append(hits)
 
     if spec.card_genes or spec.drug_classes or spec.rip_families:
         A = annotation_hits(store, spec.function_scope)
@@ -158,3 +206,48 @@ def _options(store: Store, rank: str) -> dict:
         out["drug_classes"] = sorted({x for s in card["category"].dropna() for x in s.split(";") if x})
         out["rip_families"] = sorted(a.loc[a["source"] == "ripdb", "label"].dropna().unique())
     return out
+
+
+def function_active(spec: FilterSpec) -> bool:
+    return bool(spec.card_genes or spec.drug_classes or spec.rip_families or spec.cog_letters
+                or spec.eggnog_text.strip())
+
+
+def function_hits(store: Store, spec: FilterSpec, contigs: set | None = None,
+                  limit: int = 5000) -> tuple[pd.DataFrame, dict]:
+    """Genes that match any of the function criteria in `spec` (on `contigs`, if
+    given). One row per gene and matching source: orf_id, contig, region_idx,
+    in_region, source, name, detail. Also returns the total number of matching
+    genes per source (the table is capped at `limit` rows per source)."""
+    frames, totals = [], {}
+    region = spec.function_scope == "region"
+    A = annotation_hits(store, spec.function_scope)
+    if contigs is not None:
+        A = A[A["contig"].isin(contigs)]
+    for src, labels, name in [("card", spec.card_genes, "CARD gene"),
+                              ("ripdb", spec.rip_families, "RIP-DB family")]:
+        if labels:
+            a = A[(A["source"] == src) & A["label"].isin(labels)]
+            totals[name] = len(a)
+            frames.append(a.head(limit).assign(source=name, name=a["label"],
+                                               detail=a["family"].fillna("")))
+    if spec.drug_classes:
+        a = A[A["source"] == "card"]
+        m = a["category"].fillna("").str.split(";").map(lambda xs: bool(set(xs) & set(spec.drug_classes)))
+        a = a[m.astype(bool)]
+        totals["CARD drug class"] = len(a)
+        frames.append(a.head(limit).assign(source="CARD drug class", name=a["label"],
+                                           detail=a["category"].fillna("")))
+    text = spec.eggnog_text.strip()
+    if store.has("eggnog") and (text or spec.cog_letters):
+        e, n = store.eggnog_rows(text, tuple(spec.cog_letters), region, contigs, limit)
+        totals["eggNOG"] = n
+        if len(e):
+            desc = e["description"].fillna("")
+            frames.append(e.assign(
+                source="eggNOG", name=e["preferred_name"].fillna(""),
+                detail=desc + e["cog_category"].map(lambda x: f" [COG {x}]" if isinstance(x, str) else "")))
+    cols = ["orf_id", "contig", "region_idx", "in_region", "source", "name", "detail"]
+    if not frames:
+        return pd.DataFrame(columns=cols), totals
+    return pd.concat([f[cols] for f in frames], ignore_index=True), totals
