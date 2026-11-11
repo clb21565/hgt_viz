@@ -10,7 +10,9 @@ from . import RANKS
 from .store import Store
 
 FUNCTION_FIELDS = ["card_genes", "drug_classes", "rip_families", "cog_letters", "eggnog_text",
-                   "function_scope"]
+                   "function_scope", "function_hgt_ranks"]
+SCOPES = {"contig": "anywhere on the contig", "region": "inside a kairos region",
+          "hgt": "inside a region with an HGT call"}
 
 
 @dataclass
@@ -33,7 +35,9 @@ class FilterSpec:
     rip_families: list = field(default_factory=list)
     cog_letters: list = field(default_factory=list)   # COG categories (any of)
     eggnog_text: str = ""            # substring of eggNOG name/description/KO/Pfam/CAZy/EC
-    function_scope: str = "contig"   # "contig" or "region" (inside a kairos region)
+    function_scope: str = "contig"   # "contig", "region" (inside a kairos region) or "hgt"
+                                     # (inside a region with an HGT1 call or HGT2 link)
+    function_hgt_ranks: list = field(default_factory=list)  # scope "hgt": coarsest HGT rank in
     min_length: int = 0
     min_partners: int = 0
 
@@ -55,11 +59,30 @@ def _contigs_with(df: pd.DataFrame, mask) -> set:
     return set(df.loc[mask, "contig"])
 
 
-def annotation_hits(store: Store, scope: str) -> pd.DataFrame:
+def hgt_regions(store: Store, spec: FilterSpec) -> frozenset | None:
+    """For scope 'hgt': regions with an HGT1 call or HGT2 link (coarsest rank among
+    function_hgt_ranks, if set). None for the other scopes."""
+    if spec.function_scope != "hgt":
+        return None
+    def run():
+        h = store.region_hgt()
+        m = h["hgt_rank"].notna()
+        if spec.function_hgt_ranks:
+            m &= h["hgt_rank"].isin(spec.function_hgt_ranks)
+        return frozenset(h.index[m])
+    return store.memo(("hgt_regions", tuple(spec.function_hgt_ranks)), run, maxsize=8)
+
+
+def annotation_hits(store: Store, spec: FilterSpec) -> pd.DataFrame:
     a = store.annotations
     if a is None:
-        return pd.DataFrame(columns=["contig", "source", "label", "category", "in_region"])
-    return a[a["in_region"]] if scope == "region" else a
+        return pd.DataFrame(columns=["contig", "source", "label", "category", "in_region",
+                                     "region_idx", "family", "orf_id"])
+    if spec.function_scope == "region":
+        return a[a["in_region"]]
+    if spec.function_scope == "hgt":
+        return a[a["region_idx"].isin(hgt_regions(store, spec))]
+    return a
 
 
 def lineage_terms(text: str) -> str | None:
@@ -154,7 +177,7 @@ def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
         sets.append(hits)
 
     if spec.card_genes or spec.drug_classes or spec.rip_families:
-        A = annotation_hits(store, spec.function_scope)
+        A = annotation_hits(store, spec)
         if spec.card_genes:
             sets.append(_contigs_with(A, (A["source"] == "card") & A["label"].isin(spec.card_genes)))
         if spec.drug_classes:
@@ -165,14 +188,17 @@ def _apply(store: Store, spec: FilterSpec) -> pd.DataFrame:
         if spec.rip_families:
             sets.append(_contigs_with(A, (A["source"] == "ripdb") & A["label"].isin(spec.rip_families)))
 
-    if spec.cog_letters and store.cog_counts is not None:
+    if spec.cog_letters and spec.function_scope != "hgt" and store.cog_counts is not None:
         cc = store.cog_counts
         m = cc["cog"].isin(spec.cog_letters)
         if spec.function_scope == "region":
             m &= cc["in_region"]
         sets.append(_contigs_with(cc, m))
+    elif spec.cog_letters and store.has("eggnog"):    # per gene: needs the region of each gene
+        sets.append(store.eggnog_search("", tuple(spec.cog_letters), regions=hgt_regions(store, spec)))
     if spec.eggnog_text.strip():
-        sets.append(store.eggnog_search(spec.eggnog_text.strip(), spec.function_scope == "region"))
+        sets.append(store.eggnog_search(spec.eggnog_text.strip(), (), spec.function_scope == "region",
+                                        hgt_regions(store, spec)))
 
     for s in sets:
         keep &= c["contig"].isin(s)
@@ -221,7 +247,7 @@ def function_hits(store: Store, spec: FilterSpec, contigs: set | None = None,
     genes per source (the table is capped at `limit` rows per source)."""
     frames, totals = [], {}
     region = spec.function_scope == "region"
-    A = annotation_hits(store, spec.function_scope)
+    A = annotation_hits(store, spec)
     if contigs is not None:
         A = A[A["contig"].isin(contigs)]
     for src, labels, name in [("card", spec.card_genes, "CARD gene"),
@@ -240,7 +266,8 @@ def function_hits(store: Store, spec: FilterSpec, contigs: set | None = None,
                                            detail=a["category"].fillna("")))
     text = spec.eggnog_text.strip()
     if store.has("eggnog") and (text or spec.cog_letters):
-        e, n = store.eggnog_rows(text, tuple(spec.cog_letters), region, contigs, limit)
+        e, n = store.eggnog_rows(text, tuple(spec.cog_letters), region, contigs, limit,
+                                 hgt_regions(store, spec))
         totals["eggNOG"] = n
         if len(e):
             desc = e["description"].fillna("")
@@ -249,5 +276,11 @@ def function_hits(store: Store, spec: FilterSpec, contigs: set | None = None,
                 detail=desc + e["cog_category"].map(lambda x: f" [COG {x}]" if isinstance(x, str) else "")))
     cols = ["orf_id", "contig", "region_idx", "in_region", "source", "name", "detail"]
     if not frames:
-        return pd.DataFrame(columns=cols), totals
-    return pd.concat([f[cols] for f in frames], ignore_index=True), totals
+        out = pd.DataFrame(columns=cols)
+    else:
+        out = pd.concat([f[cols] for f in frames], ignore_index=True)
+    h = store.region_hgt()
+    for col in ["hgt1_rank", "hgt2_rank", "hgt2_partners", "hgt_rank"]:
+        out[col] = out["region_idx"].map(h[col])
+    out["hgt2_partners"] = out["hgt2_partners"].fillna(0).astype(int)
+    return out, totals

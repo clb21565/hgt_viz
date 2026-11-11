@@ -130,33 +130,54 @@ class Store:
             self.eggnog_path, filters=[("contig", "==", contig)]).to_pandas(),
             maxsize=256, bucket="eggnog")
 
-    def eggnog_search(self, text: str, region_only=False) -> set:
+    @staticmethod
+    def _eggnog_mask(t, text, cog_letters, region_only, regions):
+        m = pa.array([True] * t.num_rows)
+        if text:
+            tm = None
+            for c in EGGNOG_SEARCH_COLS:
+                x = pc.fill_null(pc.match_substring(t[c], text, ignore_case=True), False)
+                tm = x if tm is None else pc.or_(tm, x)
+            m = pc.and_(m, tm)
+        if cog_letters:
+            cm = None
+            for L in cog_letters:
+                x = pc.fill_null(pc.match_substring(t["cog_category"], L), False)
+                cm = x if cm is None else pc.or_(cm, x)
+            m = pc.and_(m, cm)
+        if region_only:
+            m = pc.and_(m, pc.fill_null(t["in_region"], False))
+        if regions is not None:
+            vs = pa.array(sorted(regions), pa.string())
+            m = pc.and_(m, pc.fill_null(pc.is_in(t["region_idx"], value_set=vs), False))
+        return m
+
+    def eggnog_search(self, text: str = "", cog_letters=(), region_only=False,
+                      regions: frozenset | None = None) -> set:
         """Contigs with a gene whose eggNOG name, description, KO, Pfam, CAZy or EC
-        contains `text` (case-insensitive). Scans those columns once per query."""
+        contains `text` (case-insensitive) and/or has any of the COG letters,
+        optionally only inside kairos regions or inside the given regions."""
         def run():
             hits = set()
-            cols = ["contig", "in_region"] + EGGNOG_SEARCH_COLS
+            cols = ["contig", "in_region", "region_idx", "cog_category"] + EGGNOG_SEARCH_COLS
             pf = pq.ParquetFile(self.eggnog_path)
             for i in range(pf.num_row_groups):
-                t = pf.read_row_group(i, columns=cols)
-                m = None
-                for c in EGGNOG_SEARCH_COLS:
-                    x = pc.fill_null(pc.match_substring(t[c], text, ignore_case=True), False)
-                    m = x if m is None else pc.or_(m, x)
-                if region_only:
-                    m = pc.and_(m, pc.fill_null(t["in_region"], False))
+                t = pf.read_row_group(i, columns=list(dict.fromkeys(cols)))
+                m = self._eggnog_mask(t, text, cog_letters, region_only, regions)
                 hits.update(pc.unique(pc.filter(t["contig"], m)).to_pylist())
             return hits
-        if self.eggnog_path is None or not text:
+        if self.eggnog_path is None or not (text or cog_letters):
             return set()
-        return self.memo(("eggnog_search", text.lower(), region_only), run, maxsize=32,
-                         bucket="eggnog_search")
+        key = ("eggnog_search", text.lower(), tuple(cog_letters), region_only,
+               None if regions is None else hash(regions))
+        return self.memo(key, run, maxsize=32, bucket="eggnog_search")
 
     def eggnog_rows(self, text: str = "", cog_letters=(), region_only=False,
-                    contigs: set | None = None, limit: int = 5000) -> tuple[pd.DataFrame, int]:
+                    contigs: set | None = None, limit: int = 5000,
+                    regions: frozenset | None = None) -> tuple[pd.DataFrame, int]:
         """Genes whose eggNOG annotation contains `text` and/or has any of the COG
-        letters, optionally only on `contigs` and inside kairos regions. Returns at
-        most `limit` rows and the total number of matching genes."""
+        letters, optionally only on `contigs`, inside kairos regions or inside the
+        given regions. Returns at most `limit` rows and the total number of matches."""
         def run():
             cols = ["orf_id", "contig", "region_idx", "in_region", "cog_category"] + EGGNOG_SEARCH_COLS
             pf = pq.ParquetFile(self.eggnog_path)
@@ -164,21 +185,7 @@ class Store:
             parts, total = [], 0
             for i in range(pf.num_row_groups):
                 t = pf.read_row_group(i, columns=list(dict.fromkeys(cols)))
-                m = pa.array([True] * t.num_rows)
-                if text:
-                    tm = None
-                    for c in EGGNOG_SEARCH_COLS:
-                        x = pc.fill_null(pc.match_substring(t[c], text, ignore_case=True), False)
-                        tm = x if tm is None else pc.or_(tm, x)
-                    m = pc.and_(m, tm)
-                if cog_letters:
-                    cm = None
-                    for L in cog_letters:
-                        x = pc.fill_null(pc.match_substring(t["cog_category"], L), False)
-                        cm = x if cm is None else pc.or_(cm, x)
-                    m = pc.and_(m, cm)
-                if region_only:
-                    m = pc.and_(m, pc.fill_null(t["in_region"], False))
+                m = self._eggnog_mask(t, text, cog_letters, region_only, regions)
                 if vs is not None:
                     m = pc.and_(m, pc.is_in(t["contig"], value_set=vs))
                 n = pc.sum(m).as_py() or 0
@@ -190,8 +197,31 @@ class Store:
         if self.eggnog_path is None or not (text or cog_letters):
             return pd.DataFrame(), 0
         key = ("eggnog_rows", text.lower(), tuple(cog_letters), region_only,
-               None if contigs is None else hash(frozenset(contigs)), limit)
+               None if contigs is None else hash(frozenset(contigs)), limit,
+               None if regions is None else hash(regions))
         return self.memo(key, run, maxsize=8, bucket="eggnog_rows")
+
+    def region_hgt(self) -> pd.DataFrame:
+        """HGT evidence per kairos region (index region_idx): hgt1_rank, hgt2_rank
+        (coarsest rank over its HGT2 links), hgt2_partners and hgt_rank (coarsest
+        of the two; missing = region without an HGT call)."""
+        def run():
+            R = self.regions.set_index("region_idx")
+            E = self.link_ends
+            E = E[E["is_hgt2"]]
+            order = {r: i for i, r in enumerate(RANKS)}
+            ri = E["discordant_rank"].map(order)
+            h2 = (E.assign(_ri=ri).groupby("region", observed=True)
+                  .agg(_ri=("_ri", "min"), hgt2_partners=("partner", "nunique")))
+            out = pd.DataFrame(index=R.index)
+            out["hgt1_rank"] = R["hgt1_rank"]
+            out["hgt2_rank"] = h2["_ri"].reindex(out.index).map(
+                lambda i: RANKS[int(i)] if pd.notna(i) else None)
+            out["hgt2_partners"] = h2["hgt2_partners"].reindex(out.index).fillna(0).astype(int)
+            both = pd.concat([out["hgt1_rank"].map(order), out["hgt2_rank"].map(order)], axis=1).min(axis=1)
+            out["hgt_rank"] = both.map(lambda i: RANKS[int(i)] if pd.notna(i) else None)
+            return out
+        return self.memo(("region_hgt",), run, maxsize=1, bucket="region_hgt")
 
     def has(self, name) -> bool:
         if name == "eggnog":

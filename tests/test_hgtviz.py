@@ -250,3 +250,29 @@ def test_wrap_and_gene_names():
     assert [p[2] for p in placed] == ["tnpA", "intI1", "sul1"]
     assert [p[1] for p in placed] == [0, 0, 1]   # sul1 would collide with intI1: second row
     assert G.place_names(genes, lambda x: x, (0, 200000), px=1000, rows=1)[0][2] == "tnpA"
+
+
+def test_function_scope_hgt(demo):
+    s = demo
+    h = s.region_hgt()
+    # region_hgt agrees with the raw tables
+    E = s.link_ends[s.link_ends["is_hgt2"]]
+    assert set(h.index[h["hgt2_rank"].notna()]) == set(E["region"]) & set(h.index)
+    assert set(h.index[h["hgt1_rank"].notna()]) == set(s.regions.loc[s.regions["hgt1_rank"].notna(), "region_idx"])
+    hgt_regs = set(h.index[h["hgt_rank"].notna()])
+    for kw in [dict(eggnog_text="transposase"), dict(cog_letters=["X"])]:
+        spec = F.FilterSpec(function_scope="hgt", **kw)
+        hits, tot = F.function_hits(s, spec)
+        assert len(hits) and hits["region_idx"].isin(hgt_regs).all() and hits["hgt_rank"].notna().all()
+        assert set(F.apply(s, spec)["contig"]) == set(hits["contig"]) & set(s.contigs["contig"])
+        wide, _ = F.function_hits(s, F.FilterSpec(function_scope="region", **kw))
+        assert len(wide) >= len(hits)
+    # rank restriction
+    rk = h["hgt_rank"].dropna().iloc[0]
+    hits, _ = F.function_hits(s, F.FilterSpec(function_scope="hgt", function_hgt_ranks=[rk],
+                                              cog_letters=["X"]))
+    assert (hits["hgt_rank"] == rk).all()
+    card = s.annotations.loc[s.annotations["region_idx"].isin(hgt_regs) & (s.annotations["source"] == "card"), "label"]
+    if len(card):
+        hits, _ = F.function_hits(s, F.FilterSpec(function_scope="hgt", card_genes=[card.iloc[0]]))
+        assert hits["region_idx"].isin(hgt_regs).all() and len(hits)

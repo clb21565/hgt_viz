@@ -64,7 +64,9 @@ def function_summary(spec: F.FilterSpec) -> str:
             bits.append(f"{name}: {', '.join(v)}")
     if spec.eggnog_text.strip():
         bits.append(f"eggNOG contains '{spec.eggnog_text.strip()}'")
-    where = "inside kairos regions" if spec.function_scope == "region" else "anywhere on the contig"
+    where = F.SCOPES[spec.function_scope]
+    if spec.function_scope == "hgt" and spec.function_hgt_ranks:
+        where += " at " + "/".join(RANK_NAMES[r].lower() for r in spec.function_hgt_ranks)
     return "Contigs with " + "; ".join(bits) + f" ({where})"
 
 
