@@ -10,6 +10,7 @@
 #
 #   sbatch --export=ALL,REPO=/path/to/hgt_viz,RESULTS=/path/to/kairos-lr/results \
 #          [,STORE=...][,CARD_INDEX=/path/to/aro_index.tsv][,PORT=8501][,REBUILD=1] \
+#          [,ENV=name-or-path][,LOGIN_HOST=...] \
 #          slurm/hgt_viz.sbatch
 #
 # Then follow the "Tunnel:" line in hgt_viz_<jobid>.log and open http://localhost:PORT.
@@ -32,6 +33,6 @@ if [[ ! -f "$STORE/meta.json" || -n "${REBUILD:-}" ]]; then
     du -sh "$STORE"
 fi
 
-echo "Tunnel: ssh -L ${PORT}:$(hostname):${PORT} ${USER}@<login-host>"
+echo "Tunnel: ssh -N -L ${PORT}:$(hostname):${PORT} ${USER}@${LOGIN_HOST:-<login-host>}"
 HGT_VIZ_STORE="$STORE" exec streamlit run app.py \
     --server.headless true --server.port "$PORT" --browser.gatherUsageStats false

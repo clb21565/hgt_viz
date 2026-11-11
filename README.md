@@ -9,6 +9,54 @@ lineage). You filter that list, then select a contig to see the layers on top of
 its regions, HGT2 partners, HGT groups, donor–recipient pairs, CARD / RIP-DB hits and
 in situ calls.
 
+## For colleagues: try the app
+
+The app runs on a compute node of the HPC and you view it in your own browser through
+an SSH tunnel. Nothing needs installing on your computer.
+
+1. Log in to the HPC and run the launcher (the full path is in the message you got
+   with this link):
+
+   ```bash
+   bash /abs/path/to/hgt_viz/slurm/launch.sh
+   ```
+
+   It submits a small job (2 CPUs, 32 GB, 8 h), waits for it to start and prints an
+   `ssh -N -L …` command. If it says port 8501 is busy, rerun with `PORT=8642 bash …`.
+2. On **your own computer**, paste that `ssh` command into a terminal and leave it
+   open (Windows: PowerShell works).
+3. Open <http://localhost:8501> (or the port you chose). The first page takes about a
+   minute while the data loads.
+4. When you are done: `scancel <jobid>` (also printed by the launcher).
+
+### A five-minute tour
+
+- **HGT calls explained** (left menu): what the two call types mean. Start here.
+- **Contig browser**: pick a contig in the table; the gene map, the lineage table and
+  the tabs below describe it. Try the *Show contigs with* switch above the table and
+  the *Evidence shown* switch above the map.
+- **Function search**: e.g. eggNOG text `transposase` or a CARD gene, *Where* =
+  *inside a region with an HGT call*, **Apply**; select a gene and open its contig
+  (the gene is marked in red).
+- **Sidebar → Taxonomy → Search full lineages**: e.g. host `Burkholderiaceae`,
+  foreign/partner `Comamonas`.
+- **Summary** and **HGT groups**: overview of whatever the sidebar filters select.
+
+### Feedback we would like
+
+- Which calls look implausible, and what in the app made you think so (contig + region
+  IDs help)?
+- What did you look for and not find? Which labels or colours were unclear?
+- Anything slow (which page, which action)?
+
+### Setting it up for others (maintainer)
+
+Copy `slurm/site.env.example` to `slurm/site.env` (ignored by git) and fill in absolute
+paths: the store, the results it came from, the conda env (a path colleagues can read,
+e.g. `/home/<you>/.conda/envs/hgt_viz`) and the login host. Make the repo, store and env
+readable for your colleagues (e.g. `chmod -R g+rX` or `o+rX` on those directories and
+`o+x` on each parent directory). Then send them the absolute path of `slurm/launch.sh`.
+
 ## Pages
 
 | Page | What it shows |
@@ -42,7 +90,8 @@ python -m hgtviz.build \
     --card-index /path/to/card/aro_index.tsv     # optional: drug class, gene family, mechanism
 ```
 
-Inputs (under `results/detect/`, prefix = catalogue name, auto-detected):
+Inputs (under `results/detect/`, or directly in `--results` if it has no `detect/`;
+prefix = catalogue name, auto-detected):
 
 | File | Required | Used for |
 |------|----------|----------|
@@ -107,30 +156,20 @@ directory offers to build the store there.
 `conda env create -f environment.yml`, then:
 
 ```bash
-sbatch --export=ALL,REPO=$PWD,RESULTS=/path/to/kairos-lr/results,CARD_INDEX=/path/to/aro_index.tsv \
-    slurm/hgt_viz.sbatch
+sbatch --export=ALL,REPO=$PWD,RESULTS=/path/to/kairos-lr/results,STORE=/path/to/hgt_viz_store,\
+CARD_INDEX=/path/to/aro_index.tsv slurm/hgt_viz.sbatch
 ```
 
-`STORE` defaults to `hgt_viz_store/` next to `results/`. Build memory and time go to
-`build_time_<jobid>.txt`. The log prints the `ssh -L` tunnel command.
+Always pass the same `STORE` (it defaults to `hgt_viz_store/` next to `RESULTS`, which
+is easy to lose track of). Add `REBUILD=1` after changes to the kairos-lr outputs or
+after an hgt_viz update that adds store tables (the app shows which layers a store has:
+e.g. no "Identical ORFs" colour option means the store predates ORF clusters). Build
+memory and time go to `build_time_<jobid>.txt`. The log prints the `ssh -L` tunnel
+command. `slurm/launch.sh` does the same for an existing store with settings from
+`slurm/site.env` (see *For colleagues*).
 
-Or by hand:
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=hgt_viz
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --time=4:00:00
-#SBATCH --output=hgt_viz_%j.log
-
-conda activate hgt_viz
-echo "Tunnel: ssh -L 8501:$(hostname):8501 ${USER}@<login-host>"
-HGT_VIZ_STORE=/path/to/hgt_viz_store \
-    streamlit run /path/to/hgt_viz/app.py --server.headless true --server.port 8501
-```
-
-Then run the printed `ssh -L` command locally and open http://localhost:8501.
+After `git pull`, restart the job (`scancel`, then submit again); Streamlit does not
+reload the `hgtviz` package while it runs.
 
 ## Demo data
 
